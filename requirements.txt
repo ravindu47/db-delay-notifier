@@ -1,2 +1,2 @@
 pyhafas
-requests
+python-telegram-bot
