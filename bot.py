@@ -1,7 +1,5 @@
 import os
 import logging
-import datetime
-import time
 import requests
 from flask import Flask
 from threading import Thread
@@ -12,7 +10,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- FLASK SERVER ---
+# --- FLASK SERVER (Render 24/7) ---
 server = Flask(__name__)
 @server.route('/')
 def index():
@@ -26,27 +24,28 @@ def run_web_server():
 TOKEN = "8309743097:AAEtIPBmiknxtiEb9_WphCHmb0G_ozeN7cY"
 user_routes = {}
 
-# --- NEW: DIRECT API CALL (TO BYPASS DNS ISSUES) ---
-def get_station_id(name):
-    """Finds station ID using a public DB API."""
+# --- IMPROVED API CALLS ---
+def get_station_data(name):
+    """Finds station using a more reliable DB API."""
     try:
-        url = f"https://v6.db.transport.rest/locations?query={name}&results=1"
-        response = requests.get(url, timeout=10)
+        # Pfarrkirchen වගේ ජර්මන් ස්ටේෂන් වලට හොඳම API එක
+        url = f"https://v6.db.transport.rest/locations?query={name}&results=1&stops=true"
+        response = requests.get(url, timeout=15)
         data = response.json()
-        if data:
+        if data and len(data) > 0:
             return data[0]['id'], data[0]['name']
     except Exception as e:
-        logger.error(f"API Error (Location): {e}")
+        logger.error(f"Location Error: {e}")
     return None, None
 
-def get_departures(station_id):
-    """Fetches departures using a public DB API."""
+def get_delay_data(station_id):
+    """Fetches departure delays."""
     try:
-        url = f"https://v6.db.transport.rest/stops/{station_id}/departures?duration=45&results=10"
-        response = requests.get(url, timeout=10)
+        url = f"https://v6.db.transport.rest/stops/{station_id}/departures?duration=60"
+        response = requests.get(url, timeout=15)
         return response.json().get('departures', [])
     except Exception as e:
-        logger.error(f"API Error (Departures): {e}")
+        logger.error(f"Departure Error: {e}")
     return []
 
 # --- BOT HANDLERS ---
@@ -60,44 +59,42 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
 
     if step == 'start_station':
-        s_id, s_name = get_station_id(text)
+        s_id, s_name = get_station_data(text)
         if not s_id:
-            await update.message.reply_text("❌ Station not found or Server busy. Try again.")
+            await update.message.reply_text("❌ Station not found on DB. Please try a more specific name.")
             return
         context.user_data['start_id'] = s_id
         context.user_data['start_name'] = s_name
-        await update.message.reply_text(f"✅ Start: *{s_name}*\nNow send the **END** station.", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ Start: *{s_name}*\nNow send the **END** station (e.g., Passau).", parse_mode='Markdown')
         context.user_data['step'] = 'end_station'
 
     elif step == 'end_station':
-        e_id, e_name = get_station_id(text)
-        if not e_id:
-            await update.message.reply_text("❌ End station not found. Try again.")
-            return
+        e_id, e_name = get_station_data(text)
         user_routes[chat_id] = {
             'start_id': context.user_data['start_id'],
             'start_name': context.user_data['start_name'],
-            'end_name': e_name,
             'active': True
         }
-        await update.message.reply_text(f"🚀 Monitoring started for: *{context.user_data['start_name']}*!", parse_mode='Markdown')
+        await update.message.reply_text(f"🚀 Monitoring started for: *{context.user_data['start_name']}*!\nI will alert you if any train is delayed.", parse_mode='Markdown')
         context.user_data['step'] = None
 
 async def check_delays(context: ContextTypes.DEFAULT_TYPE):
     for chat_id, route in user_routes.items():
         if not route.get('active'): continue
-        
-        departures = get_departures(route['start_id'])
+        departures = get_delay_data(route['start_id'])
         for dep in departures:
             delay = dep.get('delay')
-            if delay and delay >= 300: # 300 seconds = 5 minutes
+            # 300 seconds = 5 minutes delay
+            if delay and delay >= 300:
+                line_name = dep.get('line', {}).get('name', 'Train')
+                time_str = dep.get('when', '')[11:16]
                 platform = dep.get('platform', 'N/A')
                 alert = (f"⚠️ *DELAY ALERT*\n\n"
-                         f"🚆 Train: {dep['line']['name']}\n"
-                         f"🕒 Time: {dep['when'][11:16]}\n"
+                         f"🚆 Train: {line_name}\n"
+                         f"🕒 Time: {time_str}\n"
                          f"⏳ Delay: +{int(delay/60)} mins\n"
                          f"🚉 Platform: {platform}\n"
-                         f"📍 From: {route['start_name']}")
+                         f"📍 Station: {route['start_name']}")
                 await context.bot.send_message(chat_id=chat_id, text=alert, parse_mode='Markdown')
 
 if __name__ == '__main__':
