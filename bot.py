@@ -2,276 +2,186 @@ import os
 import logging
 import requests
 import datetime
-import time
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters, Application
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, Application
 
 # --- CONFIGURATION ---
-# Getting sensitive data from Environment Variables for security
-# If running locally, make sure to set these variables or replace with actual values temporarily
+# Fetching sensitive keys from Environment Variables (Render/System)
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) 
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-# Default User Configuration (Auto-Resume)
-# This ensures the bot automatically monitors "Bad Birnbach" for the Admin upon restart.
-# Station ID for Bad Birnbach: 8000858
-PERMANENT_USERS = {
-    ADMIN_ID: "8000858", 
-}
+# --- STATION CONSTANTS ---
+# Specific Station IDs for the route
+BAD_BIRNBACH = "8000858"  # Home
+EGGENFELDEN = "8001716"   # Work
+PFARRKIRCHEN = "8004746"  # Uni
+
+# --- DIRECTION CONSTANTS ---
+# Used to filter trains going in the wrong direction
+DIR_MUHLDORF = "8000260" # Direction towards Work/Uni (West)
+DIR_PASSAU = "8000298"   # Direction towards Home (East)
 
 # --- LOGGING SETUP ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- FLASK SERVER (TO KEEP RENDER ALIVE) ---
+# --- FLASK SERVER (Keep-Alive) ---
 server = Flask(__name__)
-
 @server.route('/')
-def index():
-    return "🚆 DB Train Monitor Bot is Running Securely!"
+def index(): return "🚆 Smart Commute Bot (80/20 Logic) is Active!"
 
 def run_web_server():
-    """Runs a simple Flask server to prevent Render form putting the app to sleep immediately."""
+    """Runs a lightweight web server to keep Render active."""
     port = int(os.environ.get('PORT', 10000))
     server.run(host='0.0.0.0', port=port)
 
-# --- GLOBAL VARIABLES ---
-user_routes = {}   # Stores active monitoring routes
-sent_alerts = {}   # Stores sent alert keys to prevent duplicates
-bot_state = {
-    "sleeping": False, 
-    "last_check": time.time()
-}
-
-# --- API HELPER FUNCTIONS ---
-
-def get_station_suggestions(name):
-    """
-    Searches for stations using the DB API.
-    Returns a list of dictionaries with station ID and Name.
-    """
-    try:
-        # Fetch up to 5 results for fuzzy matching
-        url = f"https://v6.db.transport.rest/locations?query={name}&results=5"
-        res = requests.get(url, timeout=10)
-        data = res.json()
-        
-        suggestions = []
-        for item in data:
-            if item.get('type') in ['stop', 'station']:
-                suggestions.append({'id': item['id'], 'name': item['name']})
-        return suggestions
-    except Exception as e:
-        logger.error(f"Station Search API Error: {e}")
-        return []
-
-def get_delay_data(station_id):
-    """
-    Fetches departure data for a specific station for the next 2 hours.
-    """
-    try:
-        url = f"https://v6.db.transport.rest/stops/{station_id}/departures?duration=120&results=15"
-        res = requests.get(url, timeout=15)
-        return res.json().get('departures', [])
-    except Exception as e:
-        logger.error(f"Departure API Error: {e}")
-        return []
+# --- HELPER FUNCTIONS ---
 
 def get_germany_time():
-    """
-    Returns the current time adjusted to UTC+1 (Approx. Germany Time).
-    """
+    """Returns current UTC time adjusted to Germany (UTC+1)."""
     return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
 
-# --- BOT HANDLERS ---
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a welcome message and instructions."""
-    await update.message.reply_text(
-        "👋 **Hello! Welcome to DB Train Monitor.**\n\n"
-        "I am currently monitoring **Bad Birnbach** automatically.\n"
-        "To change the station, simply type the name (e.g., `Eggenfelden`).\n"
-        "I will provide buttons if multiple stations are found.", 
-        parse_mode='Markdown'
-    )
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def get_trains(station_id, direction_id):
     """
-    Handles user text input to search for stations.
-    If multiple stations are found, it displays inline buttons.
+    Fetches departures from a specific station, filtering ONLY trains 
+    heading towards a specific direction ID (Passau or Mühldorf).
     """
-    text = update.message.text
-    chat_id = update.message.chat_id
-    
-    await context.bot.send_chat_action(chat_id, action="typing")
-    
-    # Search for stations
-    suggestions = get_station_suggestions(text)
+    try:
+        url = f"https://v6.db.transport.rest/stops/{station_id}/departures?direction={direction_id}&duration=120&results=4"
+        res = requests.get(url, timeout=15).json()
+        return res.get('departures', [])
+    except Exception as e:
+        logger.error(f"API Error: {e}")
+        return []
 
-    if not suggestions:
-        await update.message.reply_text("❌ Station not found. Please check the spelling.")
+def format_train_msg(trains, origin_name):
+    """Formats raw API data into a readable list string."""
+    lines = []
+    for t in trains:
+        line = t.get('line', {}).get('name', 'Train')
+        time_str = t.get('when', '')[11:16]
+        delay = t.get('delay', 0)
+        is_cancelled = t.get('cancelled', False)
+        
+        # Status Logic
+        status = "🟢"
+        if is_cancelled: status = "❌ Cancelled"
+        elif delay >= 300: status = f"⚠️ +{int(delay/60)} min"
+        
+        lines.append(f"• `{time_str}` {origin_name}: **{line}** » {status}")
+    return lines
+
+# --- CORE LOGIC ---
+
+async def send_schedule_report(context, chat_id, is_morning_mode, manual_request=False):
+    """
+    Generates and sends the schedule report.
+    - is_morning_mode=True: Checks trains going TO Mühldorf (Work/Uni).
+    - is_morning_mode=False: Checks trains going TO Passau (Home).
+    """
+    
+    report_lines = []
+    
+    if is_morning_mode:
+        mode_text = "☀️ **Going to Work/Uni** (Default)"
+        opp_text = "🏠 Check Return Trip"
+        # Logic: Check Bad Birnbach departures heading to Mühldorf
+        trains = get_trains(BAD_BIRNBACH, DIR_MUHLDORF)
+        report_lines.extend(format_train_msg(trains, "Bad Birnbach"))
+        
+    else:
+        mode_text = "🌙 **Returning Home** (Default)"
+        opp_text = "🏢 Check Work Trip"
+        # Logic: Check Pfarrkirchen & Eggenfelden departures heading to Passau
+        t1 = get_trains(PFARRKIRCHEN, DIR_PASSAU)
+        t2 = get_trains(EGGENFELDEN, DIR_PASSAU)
+        report_lines.extend(format_train_msg(t1, "Pfarrkirchen"))
+        report_lines.extend(format_train_msg(t2, "Eggenfelden"))
+
+    # If no trains found
+    if not report_lines:
+        if manual_request: 
+            await context.bot.send_message(chat_id, "⚠️ No upcoming trains found for this route.")
         return
 
-    # If only 1 result found, set it immediately
-    if len(suggestions) == 1:
-        s = suggestions[0]
-        user_routes[chat_id] = {'start_id': s['id'], 'start_name': s['name'], 'active': True}
-        sent_alerts[chat_id] = set()
-        await update.message.reply_text(f"✅ Monitoring set to: *{s['name']}*", parse_mode='Markdown')
-        return
-
-    # If multiple results, create buttons
-    keyboard = []
-    for s in suggestions:
-        # Callback data format: "set:STATION_ID:STATION_NAME"
-        keyboard.append([InlineKeyboardButton(s['name'], callback_data=f"set:{s['id']}:{s['name']}")])
+    # Sort and Deduplicate
+    unique_lines = sorted(list(set(report_lines)))
+    msg = f"{mode_text}\n\n" + "\n".join(unique_lines)
     
+    # Interactive Button: Allows user to instantly check the OPPOSITE direction
+    keyboard = [[InlineKeyboardButton(f"🔄 {opp_text}", callback_data="switch_check")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        f"🔍 Found {len(suggestions)} stations. Please select one:", 
-        reply_markup=reply_markup
-    )
+
+    # Send Message
+    try:
+        await context.bot.send_message(chat_id, msg, reply_markup=reply_markup, parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Failed to send message: {e}")
+
+async def check_commute(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Scheduled Job: Checks time and decides which direction is 'Default' (80% Rule).
+    Runs every 10 minutes.
+    """
+    now = get_germany_time()
+    hour = now.hour
+    
+    # 80/20 Rule Implementation:
+    # Before 18:00 (6 PM) -> Assume Morning/Work Mode (80% probability)
+    # After 18:00 (6 PM)  -> Assume Evening/Home Mode (80% probability)
+    is_morning = 4 <= hour < 18 
+    
+    # Only run for the Admin
+    if ADMIN_ID != 0:
+        # We pass manual_request=False to avoid spamming "No trains found" errors automatically
+        await send_schedule_report(context, ADMIN_ID, is_morning, manual_request=False)
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles inline button clicks for station selection."""
+    """
+    Handles the 'Magic Button' click.
+    Calculates the 'Opposite' of the current default mode and sends that report.
+    """
     query = update.callback_query
-    await query.answer() 
-    
-    # Parse data from the button
-    data = query.data.split(':')
-    s_id = data[1]
-    s_name = data[2]
-    chat_id = query.message.chat_id
-
-    # Update user route
-    user_routes[chat_id] = {'start_id': s_id, 'start_name': s_name, 'active': True}
-    sent_alerts[chat_id] = set()
-    
-    await query.edit_message_text(
-        text=f"✅ **Station Updated!**\nNow monitoring: *{s_name}*", 
-        parse_mode='Markdown'
-    )
-
-async def check_updates(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Background job to check for train updates.
-    Runs every 2 minutes.
-    """
-    # Update last check time for system monitoring
-    bot_state["last_check"] = time.time()
+    await query.answer("Checking opposite direction...") # Telegram feedback
     
     now = get_germany_time()
+    hour = now.hour
     
-    # --- SMART SLEEP MODE (01:00 - 06:00) ---
-    if 1 <= now.hour < 6:
-        if not bot_state["sleeping"]:
-            bot_state["sleeping"] = True
-            for cid in user_routes: 
-                try: await context.bot.send_message(cid, "😴 **Goodnight!** Pausing alerts until 06:00.")
-                except: pass
-        return
-
-    if bot_state["sleeping"]:
-        bot_state["sleeping"] = False
-        for cid in user_routes: 
-            try: await context.bot.send_message(cid, "☀️ **Good Morning!** Resuming monitoring.")
-            except: pass
-
-    # --- TRAIN DATA PROCESSING ---
-    for chat_id, route in user_routes.items():
-        if not route.get('active'): continue
-        
-        deps = get_delay_data(route['start_id'])
-        
-        for dep in deps:
-            trip_id = dep.get('tripId', dep.get('when'))
-            is_can = dep.get('cancelled', False)
-            delay = dep.get('delay', 0)
-            
-            # Create unique alert key
-            alert_key = f"{trip_id}_{is_can}_{delay}"
-            
-            # Skip if alert already sent
-            if alert_key in sent_alerts.get(chat_id, set()): continue
-            
-            # Extract details
-            line = dep.get('line', {}).get('name', 'Train')
-            t = dep.get('when', '')[11:16]
-            plat = dep.get('platform', 'N/A')
-            load = dep.get('loadFactor', '')
-            
-            # Determine crowd level icon
-            crowd = "🟢" if load == 'low' else "🟡" if load == 'medium' else "🔴" if load in ['high', 'very-high'] else "⚪"
-            
-            msg = ""
-            if is_can:
-                msg = (f"❌ *CANCELLATION ALERT*\n"
-                       f"🚆 {line} ({t})\n"
-                       f"⚠️ **CANCELLED**\n"
-                       f"📍 {route['start_name']}")
-            elif delay and delay >= 300: # Delay > 5 mins
-                msg = (f"⚠️ *DELAY ALERT*\n"
-                       f"🚆 {line} ({t})\n"
-                       f"⏳ Delay: +{int(delay/60)} min\n"
-                       f"🚉 Plat: {plat}\n"
-                       f"👥 Load: {crowd}\n"
-                       f"📍 {route['start_name']}")
-            
-            if msg:
-                try:
-                    await context.bot.send_message(chat_id, msg, parse_mode='Markdown')
-                    # Update history to prevent spam
-                    if chat_id not in sent_alerts: sent_alerts[chat_id] = set()
-                    sent_alerts[chat_id].add(alert_key)
-                except Exception as e:
-                    logger.error(f"Failed to send alert: {e}")
-
-async def post_init(application: Application):
-    """
-    Runs immediately after bot startup.
-    Handles Auto-Resume and Admin Notification.
-    """
-    # Auto-Resume Logic for Permanent Users
-    for chat_id, s_id in PERMANENT_USERS.items():
-        if chat_id != 0: # Ensure valid ID
-            user_routes[chat_id] = {
-                'start_id': s_id, 
-                'start_name': "Bad Birnbach (Auto)", 
-                'active': True
-            }
-            sent_alerts[chat_id] = set()
+    # Determine what the current 'Default' mode is
+    current_default_is_morning = 4 <= hour < 18
     
-    # Notify Admin
-    if ADMIN_ID != 0:
-        try:
-            await application.bot.send_message(
-                ADMIN_ID, 
-                "🤖 **System Online!**\nAuto-resume active. Waiting for updates.", 
-                parse_mode='Markdown'
-            )
-        except Exception as e:
-            logger.error(f"Admin Alert Error: {e}")
+    # The user wants the OPPOSITE of the default
+    target_mode_is_morning = not current_default_is_morning 
+    
+    # Send the requested report manually
+    await send_schedule_report(context, query.message.chat_id, target_mode_is_morning, manual_request=True)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Welcome message."""
+    await update.message.reply_text(
+        "👋 **Smart Commute Bot (Passau-Mühldorf Line) Active!**\n\n"
+        "🕒 **Auto-Schedule:**\n"
+        "☀️ Before 18:00: Shows trains to **Mühldorf** (Work/Uni)\n"
+        "🌙 After 18:00: Shows trains to **Passau** (Home)\n\n"
+        "💡 **Tip:** Use the button below any message to instantly check the *other* direction! (The 20% case)."
+    )
 
 if __name__ == '__main__':
-    # Start Flask Server in a separate thread
+    # Start Web Server for Render
     Thread(target=run_web_server, daemon=True).start()
     
-    # Initialize Telegram Bot
-    if not TOKEN:
-        logger.error("Error: TELEGRAM_TOKEN not found in environment variables.")
-    else:
-        app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
-        
-        # Add Handlers
-        app.add_handler(CommandHandler('start', start))
-        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
-        app.add_handler(CallbackQueryHandler(button_callback))
-        
-        # Start Job Queue (Runs check_updates every 120 seconds)
-        if app.job_queue:
-            app.job_queue.run_repeating(check_updates, interval=120, first=10)
-        
-        # Start Polling
-        app.run_polling()
+    # Initialize Bot
+    app = ApplicationBuilder().token(TOKEN).build()
+    
+    # Handlers
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Job Queue
+    if app.job_queue:
+        # Check schedule every 10 minutes (600 seconds)
+        app.job_queue.run_repeating(check_commute, interval=600, first=10)
+    
+    app.run_polling()
