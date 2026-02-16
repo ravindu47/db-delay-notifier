@@ -2,186 +2,245 @@ import os
 import logging
 import requests
 import datetime
+import psycopg2
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, Application
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
 # --- CONFIGURATION ---
-# Fetching sensitive keys from Environment Variables (Render/System)
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
+# Supabase Database URL (Get this from Project Settings)
+DB_URL = os.environ.get("DATABASE_URL") 
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-# --- STATION CONSTANTS ---
-# Specific Station IDs for the route
-BAD_BIRNBACH = "8000858"  # Home
-EGGENFELDEN = "8001716"   # Work
-PFARRKIRCHEN = "8004746"  # Uni
-
-# --- DIRECTION CONSTANTS ---
-# Used to filter trains going in the wrong direction
-DIR_MUHLDORF = "8000260" # Direction towards Work/Uni (West)
-DIR_PASSAU = "8000298"   # Direction towards Home (East)
-
-# --- LOGGING SETUP ---
+# --- LOGGING ---
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- FLASK SERVER (Keep-Alive) ---
 server = Flask(__name__)
 @server.route('/')
-def index(): return "🚆 Smart Commute Bot (80/20 Logic) is Active!"
-
+def index(): return "🚆 SaaS Commute Bot with Database Active!"
 def run_web_server():
-    """Runs a lightweight web server to keep Render active."""
-    port = int(os.environ.get('PORT', 10000))
-    server.run(host='0.0.0.0', port=port)
+    server.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
 
-# --- HELPER FUNCTIONS ---
+# --- DATABASE FUNCTIONS ---
+def get_db_connection():
+    return psycopg2.connect(DB_URL)
 
-def get_germany_time():
-    """Returns current UTC time adjusted to Germany (UTC+1)."""
-    return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+def upsert_user(chat_id, home_id=None, home_name=None, work_id=None, work_name=None, shift_type=None):
+    """Saves or Updates user data without creating duplicates"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Check if user exists
+    cur.execute("SELECT * FROM users WHERE chat_id = %s", (chat_id,))
+    exists = cur.fetchone()
+    
+    if not exists:
+        cur.execute("INSERT INTO users (chat_id) VALUES (%s)", (chat_id,))
+        conn.commit()
 
-def get_trains(station_id, direction_id):
-    """
-    Fetches departures from a specific station, filtering ONLY trains 
-    heading towards a specific direction ID (Passau or Mühldorf).
-    """
+    # Dynamic Update
+    if home_id:
+        cur.execute("UPDATE users SET home_id=%s, home_name=%s WHERE chat_id=%s", (home_id, home_name, chat_id))
+    if work_id:
+        cur.execute("UPDATE users SET work_id=%s, work_name=%s WHERE chat_id=%s", (work_id, work_name, chat_id))
+    if shift_type:
+        cur.execute("UPDATE users SET shift_type=%s WHERE chat_id=%s", (shift_type, chat_id))
+        
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def get_all_users():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT chat_id, home_id, home_name, work_id, work_name, shift_type FROM users")
+    users = cur.fetchall()
+    conn.close()
+    return users # Returns list of tuples
+
+# --- API FUNCTIONS (JOURNEYS) ---
+def get_journey(from_id, to_id):
+    """Fetches complex connections (Start -> Transfer -> End)"""
     try:
-        url = f"https://v6.db.transport.rest/stops/{station_id}/departures?direction={direction_id}&duration=120&results=4"
-        res = requests.get(url, timeout=15).json()
-        return res.get('departures', [])
-    except Exception as e:
-        logger.error(f"API Error: {e}")
-        return []
+        # Using /journeys to support connections/transfers
+        url = f"https://v6.db.transport.rest/journeys?from={from_id}&to={to_id}&results=3&transfers=1"
+        return requests.get(url, timeout=15).json().get('journeys', [])
+    except: return []
 
-def format_train_msg(trains, origin_name):
-    """Formats raw API data into a readable list string."""
-    lines = []
-    for t in trains:
-        line = t.get('line', {}).get('name', 'Train')
-        time_str = t.get('when', '')[11:16]
-        delay = t.get('delay', 0)
-        is_cancelled = t.get('cancelled', False)
+def format_journey_msg(journeys):
+    if not journeys: return ["⚠️ No connection found."]
+    
+    msgs = []
+    for j in journeys:
+        legs = j.get('legs', [])
+        first_leg = legs[0]
+        last_leg = legs[-1]
         
-        # Status Logic
+        # Times
+        dep_time = first_leg.get('departure', '')[11:16]
+        arr_time = last_leg.get('arrival', '')[11:16]
+        
+        # Status logic
+        is_cancelled = False
+        max_delay = 0
+        platform_changed = False
+        
+        route_details = []
+        
+        for leg in legs:
+            if leg.get('cancelled'): is_cancelled = True
+            delay = leg.get('departureDelay', 0)
+            if delay and delay > max_delay: max_delay = delay
+            
+            # Platform Check
+            planned_plat = leg.get('plannedPlatform')
+            real_plat = leg.get('platform')
+            if planned_plat and real_plat and planned_plat != real_plat:
+                platform_changed = True
+            
+            line_name = leg.get('line', {}).get('name', 'Train')
+            route_details.append(line_name)
+
+        # Build Status String
         status = "🟢"
-        if is_cancelled: status = "❌ Cancelled"
-        elif delay >= 300: status = f"⚠️ +{int(delay/60)} min"
+        if is_cancelled: status = "❌ CANCELLED"
+        elif max_delay >= 300: status = f"⚠️ +{int(max_delay/60)} min"
         
-        lines.append(f"• `{time_str}` {origin_name}: **{line}** » {status}")
-    return lines
+        # Alerts
+        alert_text = ""
+        if platform_changed: alert_text += "\n📢 **PLATFORM CHANGE!** Check screens."
+        if len(legs) > 1: alert_text += f"\n🔄 Change at {legs[0].get('destination', {}).get('name')}"
 
-# --- CORE LOGIC ---
-
-async def send_schedule_report(context, chat_id, is_morning_mode, manual_request=False):
-    """
-    Generates and sends the schedule report.
-    - is_morning_mode=True: Checks trains going TO Mühldorf (Work/Uni).
-    - is_morning_mode=False: Checks trains going TO Passau (Home).
-    """
-    
-    report_lines = []
-    
-    if is_morning_mode:
-        mode_text = "☀️ **Going to Work/Uni** (Default)"
-        opp_text = "🏠 Check Return Trip"
-        # Logic: Check Bad Birnbach departures heading to Mühldorf
-        trains = get_trains(BAD_BIRNBACH, DIR_MUHLDORF)
-        report_lines.extend(format_train_msg(trains, "Bad Birnbach"))
+        msgs.append(f"⏰ `{dep_time}` - `{arr_time}`\n🚆 {' ➔ '.join(route_details)}\nResult: {status}{alert_text}\n")
         
-    else:
-        mode_text = "🌙 **Returning Home** (Default)"
-        opp_text = "🏢 Check Work Trip"
-        # Logic: Check Pfarrkirchen & Eggenfelden departures heading to Passau
-        t1 = get_trains(PFARRKIRCHEN, DIR_PASSAU)
-        t2 = get_trains(EGGENFELDEN, DIR_PASSAU)
-        report_lines.extend(format_train_msg(t1, "Pfarrkirchen"))
-        report_lines.extend(format_train_msg(t2, "Eggenfelden"))
+    return msgs
 
-    # If no trains found
-    if not report_lines:
-        if manual_request: 
-            await context.bot.send_message(chat_id, "⚠️ No upcoming trains found for this route.")
+# --- BOT LOGIC ---
+
+async def check_commute_job(context: ContextTypes.DEFAULT_TYPE):
+    """Global Loop: Checks trips for ALL users in DB"""
+    try:
+        users = get_all_users()
+    except Exception as e:
+        logger.error(f"DB Error: {e}")
         return
 
-    # Sort and Deduplicate
-    unique_lines = sorted(list(set(report_lines)))
-    msg = f"{mode_text}\n\n" + "\n".join(unique_lines)
-    
-    # Interactive Button: Allows user to instantly check the OPPOSITE direction
-    keyboard = [[InlineKeyboardButton(f"🔄 {opp_text}", callback_data="switch_check")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Send Message
-    try:
-        await context.bot.send_message(chat_id, msg, reply_markup=reply_markup, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Failed to send message: {e}")
-
-async def check_commute(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Scheduled Job: Checks time and decides which direction is 'Default' (80% Rule).
-    Runs every 10 minutes.
-    """
-    now = get_germany_time()
+    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
     hour = now.hour
-    
-    # 80/20 Rule Implementation:
-    # Before 18:00 (6 PM) -> Assume Morning/Work Mode (80% probability)
-    # After 18:00 (6 PM)  -> Assume Evening/Home Mode (80% probability)
-    is_morning = 4 <= hour < 18 
-    
-    # Only run for the Admin
-    if ADMIN_ID != 0:
-        # We pass manual_request=False to avoid spamming "No trains found" errors automatically
-        await send_schedule_report(context, ADMIN_ID, is_morning, manual_request=False)
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handles the 'Magic Button' click.
-    Calculates the 'Opposite' of the current default mode and sends that report.
-    """
-    query = update.callback_query
-    await query.answer("Checking opposite direction...") # Telegram feedback
-    
-    now = get_germany_time()
-    hour = now.hour
-    
-    # Determine what the current 'Default' mode is
-    current_default_is_morning = 4 <= hour < 18
-    
-    # The user wants the OPPOSITE of the default
-    target_mode_is_morning = not current_default_is_morning 
-    
-    # Send the requested report manually
-    await send_schedule_report(context, query.message.chat_id, target_mode_is_morning, manual_request=True)
+    for user in users:
+        chat_id, home_id, home_name, work_id, work_name, shift_type = user
+        
+        if not home_id or not work_id: continue # Skip if setup incomplete
+
+        # --- 80/20 & Shift Logic ---
+        # If 'day' shift: Morning=Work, Evening=Home
+        # If 'night' shift: Morning=Home, Evening=Work (Reverse)
+        
+        is_morning_time = 4 <= hour < 14
+        is_going_to_work = is_morning_time if shift_type == 'day' else not is_morning_time
+        
+        if is_going_to_work:
+            start_id, end_id = home_id, work_id
+            mode = f"☀️ Going to Work ({work_name})"
+        else:
+            start_id, end_id = work_id, home_id
+            mode = f"🌙 Returning Home ({home_name})"
+
+        # Fetch Journey
+        journeys = get_journey(start_id, end_id)
+        report = format_journey_msg(journeys)
+        
+        msg = f"{mode}\n\n" + "\n".join(report)
+        
+        # (Optional: Add 'Wake Up' logic here based on time)
+        
+        try:
+            # Only send if not duplicate (Simple logic for now)
+            # For a real SaaS, we would compare with last sent message ID in DB
+            await context.bot.send_message(chat_id, msg, parse_mode='Markdown')
+        except: pass
+
+# --- SETUP CONVERSATION HANDLERS ---
+# (Simplified: User sends location, we give buttons, they pick)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Welcome message."""
     await update.message.reply_text(
-        "👋 **Smart Commute Bot (Passau-Mühldorf Line) Active!**\n\n"
-        "🕒 **Auto-Schedule:**\n"
-        "☀️ Before 18:00: Shows trains to **Mühldorf** (Work/Uni)\n"
-        "🌙 After 18:00: Shows trains to **Passau** (Home)\n\n"
-        "💡 **Tip:** Use the button below any message to instantly check the *other* direction! (The 20% case)."
+        "👋 **Welcome to CommuteBot Pro!**\n\n"
+        "Let's set you up.\n"
+        "1️⃣ Send `/sethome <Station Name>`\n"
+        "2️⃣ Send `/setwork <Station Name>`\n"
+        "3️⃣ Send `/mode` to toggle Day/Night shift."
     )
+    # Ensure user exists in DB
+    Thread(target=upsert_user, args=(update.message.chat_id,)).start()
+
+async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generic function to search and show buttons"""
+    query = " ".join(context.args)
+    if not query:
+        await update.message.reply_text("Please type a station name. Ex: `/sethome Pfarrkirchen`")
+        return
+
+    # API Search
+    url = f"https://v6.db.transport.rest/locations?query={query}&results=3"
+    results = requests.get(url).json()
+    
+    if not results:
+        await update.message.reply_text("❌ Station not found.")
+        return
+
+    command = update.message.text.split()[0][1:] # 'sethome' or 'setwork'
+    buttons = []
+    for s in results:
+        # callback: "sethome:12345:Name"
+        data = f"{command}:{s['id']}:{s['name']}"
+        buttons.append([InlineKeyboardButton(s['name'], callback_data=data)])
+    
+    await update.message.reply_text(f"🔍 Results for '{query}':", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    cmd, s_id, s_name = query.data.split(':')
+    chat_id = query.message.chat_id
+    
+    if cmd == "sethome":
+        upsert_user(chat_id, home_id=s_id, home_name=s_name)
+        await query.edit_message_text(f"✅ Home set to: **{s_name}**")
+    elif cmd == "setwork":
+        upsert_user(chat_id, work_id=s_id, work_name=s_name)
+        await query.edit_message_text(f"✅ Work set to: **{s_name}**")
+
+async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    # Simple toggle logic (would need a DB fetch first ideally)
+    # For now, let's force set to Night or Day via args
+    # Usage: /mode night or /mode day
+    mode = "day"
+    if context.args and context.args[0].lower() == "night":
+        mode = "night"
+    
+    upsert_user(chat_id, shift_type=mode)
+    await update.message.reply_text(f"🔄 Shift mode set to: **{mode.upper()}**\n(Logic flipped for Day/Night)")
 
 if __name__ == '__main__':
-    # Start Web Server for Render
     Thread(target=run_web_server, daemon=True).start()
-    
-    # Initialize Bot
     app = ApplicationBuilder().token(TOKEN).build()
     
-    # Handlers
     app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('sethome', search_station))
+    app.add_handler(CommandHandler('setwork', search_station))
+    app.add_handler(CommandHandler('mode', toggle_mode))
     app.add_handler(CallbackQueryHandler(button_callback))
     
-    # Job Queue
     if app.job_queue:
-        # Check schedule every 10 minutes (600 seconds)
-        app.job_queue.run_repeating(check_commute, interval=600, first=10)
+        # Check every 15 mins (900s) to be safe with limits
+        app.job_queue.run_repeating(check_commute_job, interval=900, first=10)
     
     app.run_polling()
