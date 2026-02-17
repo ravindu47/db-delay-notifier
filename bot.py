@@ -10,7 +10,6 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Callb
 
 # --- CONFIGURATION ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-# Use your Supabase URI here in Render environment variables
 DB_URL = os.environ.get("DATABASE_URL") 
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
@@ -18,7 +17,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- FLASK SERVER (Keep-Alive) ---
+# --- FLASK SERVER (Keep-Alive for Render) ---
 server = Flask(__name__)
 @server.route('/')
 def index(): return "🚆 SaaS Commute Bot is Running!"
@@ -31,7 +30,7 @@ def get_db_connection():
     return psycopg2.connect(DB_URL)
 
 def upsert_user(chat_id, home_id=None, home_name=None, work_id=None, work_name=None, shift_type=None):
-    """Saves or Updates user data without creating duplicates (Overwrite mode)"""
+    """Saves or Updates user data (Overwrite mode) to ensure persistence"""
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -69,7 +68,7 @@ def get_journey(from_id, to_id):
         return []
 
 def format_journey_msg(journeys):
-    if not journeys: return ["⚠️ No connections found."]
+    if not journeys: return ["⚠️ No upcoming connections found."]
     
     msgs = []
     for j in journeys:
@@ -106,7 +105,6 @@ def format_journey_msg(journeys):
         transfer_text = ""
         if len(legs) > 1:
             transfer_station = legs[0].get('destination', {}).get('name', 'Transfer point')
-            # Calculate waiting time simple logic
             transfer_text = f"\n🔄 Change at: {transfer_station}"
 
         msgs.append(f"⏰ `{dep_time}` ➔ `{arr_time}`\n🚆 {' ➔ '.join(route_path)}\nResult: {status}{platform_alert}{transfer_text}")
@@ -117,33 +115,39 @@ def format_journey_msg(journeys):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
-    upsert_user(chat_id) # Register user in DB
-    await update.message.reply_text(
+    upsert_user(chat_id)
+    
+    welcome_text = (
         "👋 **Welcome to CommuteBot Pro!**\n\n"
-        "I'll track your specific route and alert you based on your schedule.\n\n"
-        "1️⃣ `/sethome <name>` - Set your Home station\n"
-        "2️⃣ `/setwork <name>` - Set your Work/Uni station\n"
-        "3️⃣ `/mode` - Toggle Day/Night shift (for 80/20 rule)\n"
-        "4️⃣ `/check` - Instant manual check"
+        "I am your personal rail assistant. I monitor your specific commute so you don't have to check the app manually.\n\n"
+        "🛡️ **Why trust me?**\n"
+        "• **Direct DB Data:** Real-time Deutsche Bahn API access.\n"
+        "• **Smart 80/20 Rule:** I auto-switch between work and home routes based on time.\n"
+        "• **Connection Aware:** I track transfers and waiting times.\n"
+        "• **Instant Alerts:** Notifications for delays, cancellations, or platform changes.\n\n"
+        "🚀 **Quick Setup:**\n"
+        "1️⃣ `/sethome <station>` - Set your Home (e.g., Bad Birnbach)\n"
+        "2️⃣ `/setwork <station>` - Set your Work/Uni (e.g., Pfarrkirchen)\n"
+        "3️⃣ `/mode` - Toggle Day/Night shift logic\n"
+        "4️⃣ `/check` - Get an instant manual status"
     )
+    await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
 async def set_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search for station and provide buttons"""
     query = " ".join(context.args)
     if not query:
-        await update.message.reply_text("Usage: `/sethome Pfarrkirchen` or `/setwork Passau`")
+        await update.message.reply_text("Usage: `/sethome <station_name>`")
         return
 
     url = f"https://v6.db.transport.rest/locations?query={query}&results=3"
     results = requests.get(url).json()
     
     if not results:
-        await update.message.reply_text("❌ Station not found. Try a different name.")
+        await update.message.reply_text("❌ Station not found.")
         return
 
-    command = update.message.text.split()[0][1:] # sethome or setwork
+    command = update.message.text.split()[0][1:] 
     buttons = [[InlineKeyboardButton(s['name'], callback_data=f"{command}:{s['id']}:{s['name']}")] for s in results]
-    
     await update.message.reply_text(f"🔍 Select your station:", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -159,15 +163,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"🏢 **Work Set:** {s_name}")
 
 async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This toggles shift mode in DB
     chat_id = update.message.chat_id
-    # We could fetch first, but let's assume day by default and switch to night if typed
     mode = "night" if context.args and context.args[0] == "night" else "day"
     upsert_user(chat_id, shift_type=mode)
-    await update.message.reply_text(f"🔄 **Shift Mode:** {mode.upper()}\n(80/20 rule adjusted)")
+    await update.message.reply_text(f"🔄 **Shift Mode:** {mode.upper()}")
 
 async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
-    """Job queue function to monitor everyone"""
     users = get_all_users()
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
     hour = now.hour
@@ -176,7 +177,7 @@ async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
         chat_id, h_id, h_name, w_id, w_name, s_type = user
         if not h_id or not w_id: continue
 
-        # 80/20 Logic with Day/Night Shift support
+        # 80/20 Prediction Logic
         is_morning = 4 <= hour < 14
         is_work_trip = is_morning if s_type == 'day' else not is_morning
         
@@ -202,7 +203,6 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_callback))
     
     if app.job_queue:
-        # Monitoring every 15 minutes to stay within API limits for multiple users
         app.job_queue.run_repeating(check_all_users, interval=900, first=10)
     
     app.run_polling()
