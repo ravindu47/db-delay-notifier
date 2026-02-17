@@ -1,88 +1,73 @@
 
 ---
 
-# 🚆 CommuteBot Pro (Hybrid SaaS Edition)
+# 🚄 CommuteBot Pro (Hybrid SaaS Edition)
 
-**CommuteBot Pro** is a comprehensive, context-aware rail assistant designed for students and professionals in Germany. Unlike standard scheduling apps, this bot tracks **Work** and **University** commutes simultaneously, using a dynamic "80/20 Rule" to predict your direction based on your shift start time.
+<div align="center">
 
-It is architected as a **SaaS (Software as a Service)** application, capable of handling multiple users with isolated profiles using a single cloud instance.
+<p align="center">
+<b>Context-Aware • Dual-Track Monitoring • Zero-Latency Alerts</b>
+</p>
+
+</div>
+
+---
+
+## 🚀 Overview
+
+**CommuteBot Pro** is an enterprise-grade rail assistant architected for the German Rail Network (Deutsche Bahn API v6). Unlike static scheduling tools, it employs a **Dynamic 80/20 Prediction Algorithm** to intelligently switch monitoring contexts between **Work** and **University** based on your shift schedule.
+
+Designed as a **SaaS (Software as a Service)** solution, it supports multi-tenancy with isolated user profiles, IPv6-optimized database pooling, and 24/7 keep-alive architecture.
 
 ---
 
 ## ✨ Key Features
 
-### 🎓 1. Hybrid Commute Tracking (Uni + Work)
+| Feature | Description |
+| --- | --- |
+| **🎓 Hybrid Tracking** | Seamlessly monitors **Workplace** and **University** commutes simultaneously. |
+| **🧠 Smart Prediction** | Auto-switches direction based on your shift: <br>
 
-* Supports dual destinations: **Workplace** and **University**.
-* Users can switch contexts or monitor both simultaneously using `/check`.
+<br>• **Morning:** Home ➔ Work/Uni <br>
 
-### 🧠 2. Dynamic "80/20" Prediction Algorithm
-
-* **Smart Routing:** The bot predicts your direction based on your specific **Start Hour** (e.g., 08:00 AM).
-* **Morning Mode (Start - 2h):** Monitors Home ➔ Work/Uni.
-* **Evening Mode (Start + 6h):** Monitors Work/Uni ➔ Home.
-
-
-* **Manual Override:** Use `/mode` to toggle logic for Night Shifts.
-
-### ⚡ 3. 24/7 Keep-Alive Architecture
-
-* Built with a lightweight **Flask Web Server** running alongside the Telegram bot.
-* Prevents cloud platforms (like Render Free Tier) from "sleeping" by accepting periodic ping requests.
-
-### 📢 4. Intelligent Alerts
-
-* **Status Coding:**
-* 🟢 **Green:** "No Delays" (Bot confirms the train is on time).
-* 🔴 **Red:** "Cancelled" or "High Delay" (>5 mins).
-* 📢 **Orange:** "Platform Change" alerts.
-
-
-* **IPv6 Optimized:** Uses Supabase Connection Pooling (Port 6543) for stable cloud connectivity.
+<br>• **Evening:** Work/Uni ➔ Home |
+| **⚡ Zero-Delay Logic** | Provides immediate "No Delay" confirmation or alerts for **Cancellations** & **Platform Changes**. |
+| **🛡️ 24/7 Availability** | Built-in Flask Keep-Alive system to bypass cloud sleep timers (Render Free Tier compatible). |
+| **🔌 Connection Pooling** | Uses Supabase Transaction Mode (Port 6543) for 100% stability on IPv6 networks. |
 
 ---
 
-## 🏗️ System Workflow
+## 🏗️ System Architecture
 
-```text
-1. User  ───> (Telegram Bot) ───> Sets Profile (/setwork, /time 8)
-2. Bot   ───> (Supabase DB)  ───> Saves Preferences via Connection Pooler
-3. Bot   ───> (DB API v6)    ───> Fetches Real-time Journey Data
-4. API   ───> (Bot)          ───> Returns Delays, Platforms & Transfers
-5. Bot   ───> (User)         ───> Sends Formatted Smart Alert
+```mermaid
+graph TD
+    User[Telegram User] -->|Commands| Bot[Flask + Python Bot]
+    Bot -->|Port 6543| DB[(Supabase PostgreSQL)]
+    Bot -->|REST API| API[DB Transport API v6]
+    API -->|JSON Data| Bot
+    Bot -->|Smart Alerts| User
 
 ```
 
 ---
 
-## 🛠️ Deployment Guide (Step-by-Step)
+## ⚙️ Installation & Deployment Guide
 
-Follow these steps to deploy the bot from scratch.
+Follow this strictly to deploy the bot from scratch.
 
-### Phase 1: Create Telegram Bot & Get IDs
+### 🔹 Phase 1: Telegram Bot Configuration
 
-Before coding, you need to register the bot on Telegram.
+1. Open Telegram and search for **[@BotFather]()**.
+2. Click **Start** and send `/newbot`.
+3. Choose a Name and Username for your bot.
+4. **Copy the API Token** (You will need this later).
+5. Search for **[@userinfobot]()** and click **Start**.
+6. Copy your numerical `Id` (This is your `ADMIN_ID`).
 
-1. **Get Bot Token:**
-* Open Telegram and search for **@BotFather**.
-* Send the command `/newbot`.
-* Give your bot a **Name** (e.g., `My Commute Helper`).
-* Give it a **Username** (must end in `bot`, e.g., `PassauCommuteBot`).
-* **Copy the HTTP API Token** (You will need this for the `TELEGRAM_TOKEN`).
+### 🔹 Phase 2: Database Setup (Supabase)
 
-
-2. **Get Your Admin ID:**
-* Search for **@userinfobot** on Telegram.
-* Click Start. It will reply with your `Id`.
-* **Copy this Number** (You will need this for `ADMIN_ID`).
-
-
-
-### Phase 2: Database Setup (Supabase)
-
-1. Create a free project at [supabase.com]().
-2. Go to the **SQL Editor** (on the left sidebar) and run this code:
-
+1. Create a project at **[Supabase.com]()**.
+2. Navigate to the **SQL Editor** 📝 and execute:
 ```sql
 CREATE TABLE users (
     chat_id BIGINT PRIMARY KEY,
@@ -96,83 +81,83 @@ CREATE TABLE users (
 
 ```
 
-3. Go to **Settings > Database > Connection Pooler**.
-4. Change **Pool Mode** to `Transaction`.
-5. Copy the **Connection String (URI)** and replace port `5432` with `6543`.
-* *Format:* `postgresql://[user].[project]:[pass]@[host]:6543/postgres`
+
+3. Go to **Project Settings ⚙️ > Database > Connection Pooler**.
+4. Set **Pool Mode** to `Transaction`.
+5. Copy the **Connection String** and **change port `5432` to `6543**`.
+> ⚠️ **Important:** You MUST use port **6543** to prevent "Network Unreachable" errors on Render.
 
 
 
-### Phase 3: Render Deployment (Hosting)
+### 🔹 Phase 3: Deploy to Render (Hosting)
 
-1. Push your code (`bot.py`, `requirements.txt`, etc.) to **GitHub**.
-2. Log in to [dashboard.render.com]() and click **New + > Web Service**.
-3. Connect your GitHub repository.
-4. **Configure Settings:**
-* **Runtime:** Python 3
+1. Fork/Push this repository to **GitHub**.
+2. Login to **[Render Dashboard]()**.
+3. Click **New +** ➔ **Web Service** ➔ Connect your Repo.
+4. **Build Settings:**
+* **Runtime:** `Python 3`
 * **Build Command:** `pip install -r requirements.txt`
 * **Start Command:** `python bot.py`
 
 
-5. **Environment Variables:**
-Add the following variables in the "Environment" tab:
-
-| Key | Value |
+5. **Environment Variables (Advanced Section):**
+| Variable | Value |
 | --- | --- |
-| `TELEGRAM_TOKEN` | Paste the token from BotFather here |
-| `DATABASE_URL` | Paste your Supabase URI (Port 6543) here |
-| `ADMIN_ID` | Paste your User ID here |
+| `TELEGRAM_TOKEN` | (Paste Token from BotFather) |
+| `DATABASE_URL` | (Paste Supabase URI with Port 6543) |
+| `ADMIN_ID` | (Paste your numeric ID) |
 | `PORT` | `10000` |
 
-### Phase 4: Preventing Sleep (The Ping Method)
-
-Render's free tier spins down after 15 minutes of inactivity. To keep the bot alive 24/7:
-
-1. Copy your **Render App URL** (e.g., `https://commutebot-pro.onrender.com`).
-2. Go to a free cron service like **Cron-job.org** or **UptimeRobot**.
-3. Create a new monitor:
-* **URL:** `https://your-app-name.onrender.com/`
-* **Interval:** Every **14 minutes** (Must be less than 15).
 
 
-4. This hits the Flask server inside `bot.py`, keeping the process active indefinitely.
+### 🔹 Phase 4: Prevent Sleeping (Keep-Alive) 🟢
 
----
+Render's free tier sleeps after 15 minutes. To keep it awake 24/7:
 
-## 📱 User Commands (Menu)
+1. Copy your App URL: `https://your-app.onrender.com`.
+2. Register at **[Cron-Job.org]()** (It's free).
+3. Create a **CronJob**:
+* **URL:** `https://your-app.onrender.com/`
+* **Execution Schedule:** Every **14 minutes**.
 
-The bot features a pop-up menu for easy navigation:
 
-* `/start` - Initialize and see instructions.
-* `/check` - **Instant Status:** Shows the next connection for Work/Uni.
-* `/sethome <station>` - Set Home location.
-* `/setwork <station>` - Set Work location.
-* `/setuni <station>` - Set University location.
-* `/time <hour>` - Set your shift start time (e.g., `/time 8`).
-* `/mode` - Toggle Day/Night shift logic.
+4. Save. Your bot will now stay online indefinitely.
 
 ---
 
-## ⚠️ Troubleshooting
+## 📱 User Guide
 
-* **"Network is unreachable" Error:**
-* Ensure you are using the Supabase **Connection Pooler** URL (Port `6543`), not the direct connection.
+Once deployed, use these commands via the Menu button:
 
-
-* **"Station not found":**
-* The bot uses URL encoding to handle German characters (ä, ö, ü). Try typing the main city name first.
-
-
+* `/start` — Initialize profile.
+* `/check` — **Instant Status Check** (Work/Uni).
+* `/sethome <city>` — Set Home Station.
+* `/setwork <city>` — Set Work Station.
+* `/setuni <city>` — Set University Station.
+* `/time <hour>` — Set Shift Start (e.g., `/time 8`).
+* `/mode` — Toggle Day/Night Shift.
 
 ---
 
 ## ⚖️ Disclaimer
 
-This project uses the public **Deutsche Bahn API (v6)**. It is an independent open-source project and is not affiliated with Deutsche Bahn AG.
+This project integrates with the public **Deutsche Bahn API (v6)**. It is an open-source educational tool and is not affiliated with Deutsche Bahn AG.
 
 ---
 
-**Maintained by:** Chameesha Ravindu
-**License:** MIT
+<div align="center">
+
+**Maintained by Chameesha Ravindu**
+
+
+
+
+
+Licensed under MIT © 2026
+
+</div>
 
 ---
+
+
+දැන් කොහොමද මචං? මේක කෙලින්ම GitHub එකට දාමු! 🔥
