@@ -1,69 +1,156 @@
-# 🚆 Smart Commute Assistant (Passau-Mühldorf Line)
 
-![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
-![Telegram](https://img.shields.io/badge/Telegram-Bot-blue)
-![Status](https://img.shields.io/badge/Status-Active-success)
+# 🚆 CommuteBot Pro (SaaS Edition)
 
-A highly customized, intelligent Telegram bot designed for commuters on the **Passau — Mühldorf** railway line. It uses the "80/20 Rule" to predict your travel direction based on the time of day, while offering a single-tap solution for off-schedule trips.
+**CommuteBot Pro** is an intelligent, multi-user rail assistant designed for the **Passau — Mühldorf** railway line in Germany. Unlike standard scheduling apps, this bot uses **predictive algorithms (80/20 Rule)** and **persistent user profiles** to deliver proactive, context-aware travel alerts.
 
-## 🌟 Key Features
-
-### 🧠 Smart "80/20" Schedule Logic
-The bot automatically switches its monitoring direction based on probable commute patterns:
-* **☀️ Morning Mode (04:00 - 18:00):** Monitors departures from **Bad Birnbach** heading towards **Mühldorf** (Work/Uni).
-* **🌙 Evening Mode (18:00 - 04:00):** Monitors departures from **Pfarrkirchen & Eggenfelden** heading towards **Passau** (Home).
-
-### 🧭 Direction Filtering
-Unlike standard bots, this system filters trains by their final destination.
-* *Going to Work?* It hides trains going the wrong way (to Passau).
-* *Going Home?* It hides trains going further away (to Mühldorf).
-
-### 🔄 The "Magic Button" (20% Case)
-Need to go home early? Or work a late shift?
-Every automatic message includes a **Dynamic Button**. One tap instantly checks the *opposite* direction without needing to type commands.
-
-### ⚡ Real-Time Alerts
-* **Delays:** Alerts if a train is delayed by >5 minutes.
-* **Cancellations:** Instant warnings for cancelled trips.
-* **Platform Info:** Displays track numbers.
+It is built to run as a **SaaS (Software as a Service)** model, supporting hundreds of students and commuters with personalized schedules using a single cloud instance.
 
 ---
 
-## 🛠️ Deployment Guide
+## 🎯 The Problem
 
-This bot is optimized for **Render (Free Tier)** with a Cron-job to keep it awake.
+Commuters on regional lines often face a repetitive struggle:
+
+1. Opening the DB Navigator app multiple times a day.
+2. Manually searching for the same connections (Home ↔ Work).
+3. Missing crucial updates like **Platform Changes** or **Cancellations** until they arrive at the station.
+
+## 💡 The Solution
+
+CommuteBot Pro eliminates manual checking. It "knows" where you need to be based on the time of day and notifies you **only** when there is relevant information (Delays, Platform changes, etc.).
+
+---
+
+## ✨ Key Features
+
+### 🧠 1. Smart "80/20" Prediction Algorithm
+
+The bot intelligently guesses your direction based on the time of day:
+
+* **04:00 - 14:00 (Morning Mode):** Automatically monitors trains from **Home → Work**.
+* **14:00 - 04:00 (Evening Mode):** Automatically monitors trains from **Work → Home**.
+* *Result:* Users get the right information without typing a single command.
+
+### 🗄️ 2. Persistent User Database (Supabase)
+
+* User preferences (`Home Station`, `Work Station`, `Shift Type`) are stored in a **PostgreSQL Database**.
+* **Benefit:** Data is never lost, even if the hosting server restarts.
+* **Scalability:** Supports unlimited unique users with custom routes.
+
+### 📢 3. Advanced Alert System
+
+The bot parses complex API data to provide specific alerts:
+
+* **🚨 Platform Changes:** Compares `plannedPlatform` vs. `actualPlatform` and alerts users immediately (e.g., *"Change to Platform 3!"*).
+* **⚠️ Delay Thresholds:** Highlights delays over 5 minutes.
+* **❌ Cancellations:** Instant notification if a trip is cancelled.
+
+### 🔗 4. Complex Journey Tracking
+
+* Supports **Connecting Trains**: Instead of just departures, it tracks full journeys (A → Transfer → B).
+* **Transfer Logic:** Displays where to change trains and the waiting time.
+
+### 🌙 5. Shift Worker Support
+
+* Includes a **Day/Night Mode** toggle.
+* *Night Mode:* Reverses the 80/20 logic for users working night shifts (Morning = Home, Evening = Work).
+
+---
+
+## 🏗️ System Architecture
+
+```mermaid
+graph TD
+    User[Telegram User] -->|Commands| Bot[Python Bot (Render)]
+    Bot -->|Read/Write| DB[(Supabase PostgreSQL)]
+    Bot -->|Fetch Schedule| API[Deutsche Bahn API v6]
+    API -->|JSON Data| Bot
+    Bot -->|Formatted Alert| User
+
+```
+
+---
+
+## 🛠️ Installation & Setup
 
 ### Prerequisites
-1.  **Telegram Bot Token:** From [@BotFather](https://t.me/BotFather).
-2.  **Admin ID:** Your Telegram User ID (from [@userinfobot](https://t.me/userinfobot)).
 
-### Step 1: Deploy to Render
-1.  Clone this repository.
-2.  Create a new **Web Service** on Render.
-3.  Set **Build Command:** `pip install -r requirements.txt`
-4.  Set **Start Command:** `python bot.py`
+* Python 3.9+
+* A Telegram Bot Token (via @BotFather)
+* A Supabase Account (Free Tier)
+* Render Account (for hosting)
 
-### Step 2: Environment Variables
-Go to the "Environment" tab in Render and add:
-* `TELEGRAM_TOKEN`: (Your Bot Token)
-* `ADMIN_ID`: (Your User ID)
+### 1. Database Setup (Supabase)
 
-### Step 3: Keep-Alive (Cron Job)
-To prevent the free tier from sleeping:
-1.  Register on [cron-job.org](https://cron-job.org).
-2.  Create a job to ping your Render URL (e.g., `https://your-bot.onrender.com/`) every **5 minutes**.
+1. Create a new project on [Supabase]().
+2. Go to the **SQL Editor** and run this schema:
+
+```sql
+-- Creates a table to store user preferences with support for updates
+CREATE TABLE users (
+    chat_id BIGINT PRIMARY KEY,  -- Telegram User ID
+    home_id TEXT,                -- Station ID (EVA_NR)
+    home_name TEXT,              -- Station Name
+    work_id TEXT,
+    work_name TEXT,
+    shift_type TEXT DEFAULT 'day', -- 'day' or 'night'
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+```
+
+### 2. Environment Variables
+
+Create a `.env` file or set these in your cloud provider:
+
+```bash
+TELEGRAM_TOKEN=your_telegram_bot_token
+ADMIN_ID=your_personal_telegram_id
+DATABASE_URL=postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres
+PORT=10000
+
+```
+
+### 3. Run Locally
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the bot
+python bot.py
+
+```
 
 ---
 
-## 📂 Project Structure
+## 📱 User Guide (Commands)
 
-* `bot.py`: Main application logic with Flask server and Telegram handlers.
-* `requirements.txt`: Dependencies (`python-telegram-bot`, `flask`, `requests`).
+| Command | Description |
+| --- | --- |
+| `/start` | Registers the user in the database and shows the welcome guide. |
+| `/sethome <name>` | Search and set your **Home** station (e.g., `/sethome Bad Birnbach`). |
+| `/setwork <name>` | Search and set your **Work/Uni** station (e.g., `/setwork Pfarrkirchen`). |
+| `/mode <day/night>` | Toggle your shift type. Useful for night-shift workers. |
+| `/check` | Manually triggers an instant schedule check for your current route. |
 
 ---
 
-## ⚠️ Disclaimer
-This project uses the public **Deutsche Bahn API (v6)**. It is a personal project and is not affiliated with Deutsche Bahn AG.
+## 🔮 Future Roadmap
+
+* [ ] **Push Notifications:** Alert only when a delay > 10 mins occurs (Silent mode otherwise).
+* [ ] **Subscription Model:** Integration with Stripe for premium features.
+* [ ] **Calendar Sync:** Sync train times with Google Calendar.
+* [ ] **GPS Support:** "Take me home" feature using live location.
 
 ---
-**Author:** Ravindu
+
+## ⚖️ Disclaimer
+
+This project uses the public **Deutsche Bahn API (v6)**. It is an independent project and is not affiliated with Deutsche Bahn AG.
+
+---
+
+**Maintained by:** Chameesha Ravindu
+**License:** MIT
+
