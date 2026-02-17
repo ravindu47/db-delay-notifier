@@ -61,9 +61,9 @@ The bot parses complex API data to provide specific alerts:
 
 ```mermaid
 graph TD
-    User[Telegram User] -->|Commands| Bot[Python Bot (Render)]
-    Bot -->|Read/Write| DB[(Supabase PostgreSQL)]
-    Bot -->|Fetch Schedule| API[Deutsche Bahn API v6]
+    User[Telegram User] -->|Commands| Bot["Python Bot (Render)"]
+    Bot -->|Read/Write| DB[("Supabase PostgreSQL")]
+    Bot -->|Fetch Schedule| API["Deutsche Bahn API v6"]
     API -->|JSON Data| Bot
     Bot -->|Formatted Alert| User
 
