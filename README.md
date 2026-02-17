@@ -59,14 +59,11 @@ The bot parses complex API data to provide specific alerts:
 
 ## 🏗️ System Architecture
 
-```mermaid
-graph TD
-    A[Telegram User] --> B[CommuteBot]
-    B --> C[Supabase DB]
-    B --> D[DB API]
-    D --> B
-    B --> A
-```
+1. User  ───> (Telegram Bot) ───> Sends Commands (/sethome, /setwork)
+2. Bot   ───> (Supabase DB)  ───> Saves/Updates User Preferences
+3. Bot   ───> (DB API)       ───> Fetches Real-time Journey Data
+4. API   ───> (Bot)          ───> Returns Delays, Platforms & Transfers
+5. Bot   ───> (User)          ───> Sends Personalized Smart Alert
 
 ---
 
