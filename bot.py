@@ -18,7 +18,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- FLASK SERVER (Keep-Alive) ---
+# --- FLASK SERVER ---
 server = Flask(__name__)
 @server.route('/')
 def index(): return "🚆 Hybrid CommuteBot Pro is Active!"
@@ -79,7 +79,7 @@ def get_journey(from_id, to_id):
     except: return []
 
 def format_route_status(journeys, label):
-    if not journeys: return f"📍 **{label}:** ⚠️ No connection found."
+    if not journeys: return f"📍 *{label}:* ⚠️ No connection found."
     j = journeys[0]
     legs = j.get('legs', [])
     dep = legs[0].get('departure', '')[11:16]
@@ -87,13 +87,14 @@ def format_route_status(journeys, label):
     max_delay = max((leg.get('departureDelay', 0) or 0) for leg in legs)
     is_cancelled = any(leg.get('cancelled') for leg in legs)
     
-    if is_cancelled: status = "❌ **CANCELLED**"
-    elif max_delay > 60: status = f"⚠️ **Delay +{int(max_delay/60)} min**"
-    else: status = "✅ **No Delays**"
+    # Using single asterisk for BOLD in standard Markdown
+    if is_cancelled: status = "❌ *CANCELLED*"
+    elif max_delay > 60: status = f"⚠️ *Delay +{int(max_delay/60)} min*"
+    else: status = "✅ *No Delays*"
 
     plat = legs[0].get('platform')
     route_str = " ➔ ".join([l.get('line', {}).get('name', 'Train') for l in legs])
-    return f"📍 **{label}** ({dep} - {arr})\nStatus: {status}\n🚆 {route_str} (Gl. {plat})"
+    return f"📍 *{label}* ({dep} - {arr})\nStatus: {status}\n🚆 {route_str} (Gl. {plat})"
 
 # --- LOGIC ENGINE ---
 async def get_commute_plan(user):
@@ -116,20 +117,20 @@ async def get_commute_plan(user):
     going_to_dest = is_morning if s_type == 'day' else not is_morning
     routes = []
     
+    # Using single asterisk for BOLD in standard Markdown
     if going_to_dest:
         if w_id: routes.append({"label": "To Work", "from": h_id, "to": w_id})
         if u_id: routes.append({"label": "To Uni", "from": h_id, "to": u_id})
-        header = "🌅 **Morning Commute**"
+        header = "🌅 *Morning Commute*"
     else:
         if w_id: routes.append({"label": "Return Home (Work)", "from": w_id, "to": h_id})
         if u_id: routes.append({"label": "Return Home (Uni)", "from": u_id, "to": h_id})
-        header = "🌙 **Evening Return**"
+        header = "🌙 *Evening Return*"
     return routes, header
 
 # --- HANDLERS ---
 
 async def post_init(application: Application):
-    """Sets commands after bot init to avoid loop errors"""
     commands = [
         BotCommand("start", "Start & Register"),
         BotCommand("check", "Instant Check"),
@@ -145,9 +146,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     upsert_user(chat_id)
     await update.message.reply_text(
-        "👋 **Welcome to Hybrid CommuteBot Pro!**\n\n"
+        "👋 *Welcome to Hybrid CommuteBot Pro!*\n\n"
         "Use the Menu button to setup stations and time.\n"
-        "Example: `/time 8` sets your start time to 08:00."
+        "Example: `/time 8` sets your start time to 08:00.",
+        parse_mode='Markdown'
     )
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -156,7 +158,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user: return
     routes, header = await get_commute_plan(user)
     if not routes:
-        await update.message.reply_text(f"⚠️ {header}")
+        await update.message.reply_text(f"⚠️ {header}", parse_mode='Markdown')
         return
     final_msg = [header]
     for r in routes:
@@ -167,19 +169,17 @@ async def set_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         h = int(context.args[0])
         if 0 <= h <= 23:
-            # Fixed Syntax Error Here: ensure parenthesis is closed
             upsert_user(update.message.chat_id, start_hour=h)
-            await update.message.reply_text(f"🕒 Start Time set to: **{h}:00**.")
+            await update.message.reply_text(f"🕒 Start Time set to: *{h}:00*.", parse_mode='Markdown')
         else: raise ValueError
-    except: await update.message.reply_text("⚠️ Usage: `/time 8` (for 8 AM).")
+    except: await update.message.reply_text("⚠️ Usage: `/time 8` (for 8 AM).", parse_mode='Markdown')
 
 async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update.message.chat_id)
     current_mode = user[7] if user and user[7] else 'day'
     new_mode = 'night' if current_mode == 'day' else 'day'
-    # Fixed Syntax Error Here: ensure parenthesis is closed
     upsert_user(update.message.chat_id, shift_type=new_mode)
-    await update.message.reply_text(f"🔄 Mode: **{new_mode.upper()} Shift**")
+    await update.message.reply_text(f"🔄 Mode: *{new_mode.upper()} Shift*", parse_mode='Markdown')
 
 async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args)
@@ -200,7 +200,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cmd == "sethome": upsert_user(q.message.chat_id, home_id=sid, home_name=sname)
     elif cmd == "setwork": upsert_user(q.message.chat_id, work_id=sid, work_name=sname)
     elif cmd == "setuni": upsert_user(q.message.chat_id, uni_id=sid, uni_name=sname)
-    await q.edit_message_text(f"✅ **{cmd[3:].capitalize()}** set to: **{sname}**")
+    await q.edit_message_text(f"✅ *{cmd[3:].capitalize()}* set to: *{sname}*", parse_mode='Markdown')
 
 async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
     for u in get_all_users():
@@ -213,11 +213,10 @@ async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
             max_d = max((l.get('departureDelay', 0) or 0) for l in js[0].get('legs', []))
             if max_d > 300 or any(l.get('cancelled') for l in js[0].get('legs', [])):
                 alerts.append(format_route_status(js, r['label']))
-        if alerts: await context.bot.send_message(u[0], "🔔 **Alert**\n\n" + "\n\n".join(alerts), parse_mode='Markdown')
+        if alerts: await context.bot.send_message(u[0], "🔔 *Alert*\n\n" + "\n\n".join(alerts), parse_mode='Markdown')
 
 if __name__ == '__main__':
     Thread(target=run_web_server, daemon=True).start()
-    # Corrected Post Init call
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     
     app.add_handler(CommandHandler('start', start))
