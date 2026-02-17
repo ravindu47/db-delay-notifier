@@ -7,7 +7,7 @@ from flask import Flask
 from threading import Thread
 from urllib.parse import quote
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, Application
 
 # --- CONFIGURATION ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -24,7 +24,9 @@ server = Flask(__name__)
 def index(): return "🚆 Hybrid CommuteBot Pro is Active!"
 
 def run_web_server():
-    server.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
+    # Attempting to bind to the correct port for Render
+    port = int(os.environ.get('PORT', 10000))
+    server.run(host='0.0.0.0', port=port)
 
 # --- DATABASE FUNCTIONS ---
 def get_db_connection():
@@ -32,7 +34,6 @@ def get_db_connection():
     return psycopg2.connect(DB_URL, connect_timeout=10)
 
 def upsert_user(chat_id, home_id=None, home_name=None, work_id=None, work_name=None, uni_id=None, uni_name=None, shift_type=None, start_hour=None):
-    """Saves or Updates user data"""
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -74,14 +75,12 @@ def get_all_users():
 
 # --- API & FORMATTING ---
 def get_journey(from_id, to_id):
-    """Fetches immediate connection"""
     try:
         url = f"https://v6.db.transport.rest/journeys?from={from_id}&to={to_id}&results=1&transfers=1"
         return requests.get(url, timeout=15).json().get('journeys', [])
     except: return []
 
 def format_route_status(journeys, label):
-    """Formats status including No Delay message"""
     if not journeys: return f"📍 **{label}:** ⚠️ No connection found."
     j = journeys[0]
     legs = j.get('legs', [])
@@ -100,7 +99,6 @@ def format_route_status(journeys, label):
 
 # --- LOGIC ENGINE ---
 async def get_commute_plan(user):
-    """80/20 Prediction Logic"""
     _, h_id, h_name, w_id, w_name, u_id, u_name, s_type, start_hour = user
     if not h_id: return None, "Please set Home station first."
     if not w_id and not u_id: return None, "Please set Work or Uni station."
@@ -126,8 +124,11 @@ async def get_commute_plan(user):
 
 # --- HANDLERS ---
 
-async def set_commands(application):
-    """Sets the popup menu commands"""
+async def post_init(application: Application):
+    """
+    FIX: This runs AFTER the event loop is created but BEFORE the bot starts polling.
+    This prevents the 'RuntimeError: There is no current event loop' crash.
+    """
     commands = [
         BotCommand("start", "Start the bot & register"),
         BotCommand("check", "Check next Work/Uni connection"),
@@ -138,6 +139,7 @@ async def set_commands(application):
         BotCommand("mode", "Toggle Day/Night Shift mode")
     ]
     await application.bot.set_my_commands(commands)
+    logger.info("✅ Menu commands set successfully via post_init!")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -168,67 +170,4 @@ async def set_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         h = int(context.args[0])
         if 0 <= h <= 23:
-            upsert_user(update.message.chat_id, start_hour=h)
-            await update.message.reply_text(f"🕒 Start Time set to: **{h}:00**.")
-        else: raise ValueError
-    except: await update.message.reply_text("⚠️ Usage: `/time 8` (for 8 AM).")
-
-async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = get_user(update.message.chat_id)
-    new_mode = 'night' if (user[7] if user else 'day') == 'day' else 'day'
-    upsert_user(update.message.chat_id, shift_type=new_mode)
-    await update.message.reply_text(f"🔄 Mode: **{new_mode.upper()} Shift**")
-
-async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args)
-    if not query: return
-    # Fixed with URL Encoding
-    url = f"https://v6.db.transport.rest/locations?query={quote(query)}&results=3"
-    try:
-        res = requests.get(url, timeout=10).json()
-        if not res: return
-        cmd = update.message.text.split()[0][1:]
-        btns = [[InlineKeyboardButton(s['name'], callback_data=f"{cmd}:{s['id']}:{s['name']}")] for s in res]
-        await update.message.reply_text("🔍 Select Station:", reply_markup=InlineKeyboardMarkup(btns))
-    except: pass
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    cmd, sid, sname = q.data.split(':')
-    if cmd == "sethome": upsert_user(q.message.chat_id, home_id=sid, home_name=sname)
-    elif cmd == "setwork": upsert_user(q.message.chat_id, work_id=sid, work_name=sname)
-    elif cmd == "setuni": upsert_user(q.message.chat_id, uni_id=sid, uni_name=sname)
-    await q.edit_message_text(f"✅ **{cmd[3:].capitalize()}** set to: **{sname}**")
-
-async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
-    for u in get_all_users():
-        routes, _ = await get_commute_plan(u)
-        if not routes: continue
-        alerts = []
-        for r in routes:
-            js = get_journey(r['from'], r['to'])
-            if not js: continue
-            max_d = max((l.get('departureDelay', 0) or 0) for l in js[0].get('legs', []))
-            if max_d > 300 or any(l.get('cancelled') for l in js[0].get('legs', [])):
-                alerts.append(format_route_status(js, r['label']))
-        if alerts: await context.bot.send_message(u[0], "🔔 **Alert**\n\n" + "\n\n".join(alerts), parse_mode='Markdown')
-
-if __name__ == '__main__':
-    Thread(target=run_web_server, daemon=True).start()
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('sethome', search_station))
-    app.add_handler(CommandHandler('setwork', search_station))
-    app.add_handler(CommandHandler('setuni', search_station))
-    app.add_handler(CommandHandler('time', set_time))
-    app.add_handler(CommandHandler('mode', toggle_mode))
-    app.add_handler(CommandHandler('check', check_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    
-    # Set Menu Commands
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(set_commands(app))
-    
-    if app.job_queue: app.job_queue.run_repeating(check_all_users, interval=900, first=10)
-    app.run_polling()
+            upsert_user(update.message.chat_id
