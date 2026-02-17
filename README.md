@@ -1,120 +1,78 @@
+# 🚆 CommuteBot Pro (Hybrid SaaS Edition)
 
-# 🚆 CommuteBot Pro (SaaS Edition)
-
-**CommuteBot Pro** is an intelligent, multi-user rail assistant designed for the **Passau — Mühldorf** railway line in Germany. Unlike standard scheduling apps, this bot uses **predictive algorithms (80/20 Rule)** and **persistent user profiles** to deliver proactive, context-aware travel alerts.
-
-It is built to run as a **SaaS (Software as a Service)** model, supporting hundreds of students and commuters with personalized schedules using a single cloud instance.
+**CommuteBot Pro** is a high-performance, context-aware rail assistant for Germany. It uses **predictive algorithms** and **dual-track monitoring** to support students and workers commuting to multiple locations (Work and University).
 
 ---
-
-## 🎯 The Problem
-
-Commuters on regional lines often face a repetitive struggle:
-
-1. Opening the DB Navigator app multiple times a day.
-2. Manually searching for the same connections (Home ↔ Work).
-3. Missing crucial updates like **Platform Changes** or **Cancellations** until they arrive at the station.
 
 ## 💡 The Solution
 
-CommuteBot Pro eliminates manual checking. It "knows" where you need to be based on the time of day and notifies you **only** when there is relevant information (Delays, Platform changes, etc.).
+This bot eliminates the need to manually check the DB Navigator app. It understands your daily routine and sends proactive alerts for delays, cancellations, or platform changes specifically for your upcoming trip.
 
----
+## ✨ Advanced Features
 
-## ✨ Key Features
+### 🎓 1. Dual-Track Monitoring (Work + Uni)
 
-### 🧠 1. Smart "80/20" Prediction Algorithm
+* Users can set both **Work** and **University** locations.
+* The bot tracks both schedules and provides a combined status report.
 
-The bot intelligently guesses your direction based on the time of day:
+### ⏰ 2. Dynamic "80/20" Prediction
 
-* **04:00 - 14:00 (Morning Mode):** Automatically monitors trains from **Home → Work**.
-* **14:00 - 04:00 (Evening Mode):** Automatically monitors trains from **Work → Home**.
-* *Result:* Users get the right information without typing a single command.
+* Unlike fixed timers, users set their own **Work Start Time** (e.g., `/time 8`).
+* The bot automatically switches direction:
+* **Morning:** Home ➔ Work/Uni (Starts 2h before work).
+* **Evening:** Work/Uni ➔ Home.
 
-### 🗄️ 2. Persistent User Database (Supabase)
 
-* User preferences (`Home Station`, `Work Station`, `Shift Type`) are stored in a **PostgreSQL Database**.
-* **Benefit:** Data is never lost, even if the hosting server restarts.
-* **Scalability:** Supports unlimited unique users with custom routes.
 
-### 📢 3. Advanced Alert System
+### 📢 3. Intelligent Status Reporting
 
-The bot parses complex API data to provide specific alerts:
+* **Zero Delay Mode:** Shows "✅ No Delays" and upcoming train details even when on time.
+* **Real-time Alerts:** Instant notifications for cancellations and platform shifts.
 
-* **🚨 Platform Changes:** Compares `plannedPlatform` vs. `actualPlatform` and alerts users immediately (e.g., *"Change to Platform 3!"*).
-* **⚠️ Delay Thresholds:** Highlights delays over 5 minutes.
-* **❌ Cancellations:** Instant notification if a trip is cancelled.
+### 🔗 4. IPv6 Optimized Connection
 
-### 🔗 4. Complex Journey Tracking
-
-* Supports **Connecting Trains**: Instead of just departures, it tracks full journeys (A → Transfer → B).
-* **Transfer Logic:** Displays where to change trains and the waiting time.
-
-### 🌙 5. Shift Worker Support
-
-* Includes a **Day/Night Mode** toggle.
-* *Night Mode:* Reverses the 80/20 logic for users working night shifts (Morning = Home, Evening = Work).
+* Uses **Supabase Connection Pooling (Port 6543)** to ensure 100% uptime on cloud hosting like Render, bypassing common IPv6 network issues.
 
 ---
 
 ## 🏗️ System Architecture
 
-1. User  ───> (Telegram Bot) ───> Sends Commands (/sethome, /setwork)
-2. Bot   ───> (Supabase DB)  ───> Saves/Updates User Preferences
-3. Bot   ───> (DB API)       ───> Fetches Real-time Journey Data
-4. API   ───> (Bot)          ───> Returns Delays, Platforms & Transfers
-5. Bot   ───> (User)          ───> Sends Personalized Smart Alert
+1. **User** ───> **Telegram Bot** (Slash Commands: /setuni, /setwork, /check)
+2. **Bot** ───> **Supabase DB (Port 6543)** (Stores User Profiles & Custom Shifts)
+3. **Bot** ───> **DB Transport API v6** (Fetches real-time journey data)
+4. **API** ───> **Bot** (Parses delays, cancellations & platform data)
+5. **Bot** ───> **User** (Proactive Smart Alerts)
 
 ---
 
 ## 🛠️ Installation & Setup
 
-### Prerequisites
+### 1. Database Schema
 
-* Python 3.9+
-* A Telegram Bot Token (via @BotFather)
-* A Supabase Account (Free Tier)
-* Render Account (for hosting)
-
-### 1. Database Setup (Supabase)
-
-1. Create a new project on [Supabase]().
-2. Go to the **SQL Editor** and run this schema:
+Run this in your Supabase SQL Editor to support the Hybrid features:
 
 ```sql
--- Creates a table to store user preferences with support for updates
 CREATE TABLE users (
-    chat_id BIGINT PRIMARY KEY,  -- Telegram User ID
-    home_id TEXT,                -- Station ID (EVA_NR)
-    home_name TEXT,              -- Station Name
-    work_id TEXT,
-    work_name TEXT,
-    shift_type TEXT DEFAULT 'day', -- 'day' or 'night'
+    chat_id BIGINT PRIMARY KEY,
+    home_id TEXT, home_name TEXT,
+    work_id TEXT, work_name TEXT,
+    uni_id TEXT, uni_name TEXT,
+    shift_type TEXT DEFAULT 'day',
+    start_hour INT DEFAULT 8,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 ```
 
-### 2. Environment Variables
+### 2. Environment Variables (.env)
 
-Create a `.env` file or set these in your cloud provider:
+**Note:** Use the Pooler URI for the `DATABASE_URL` to avoid connectivity errors.
 
-```bash
-TELEGRAM_TOKEN=your_telegram_bot_token
-ADMIN_ID=your_personal_telegram_id
-DATABASE_URL=postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres
+```env
+TELEGRAM_TOKEN=your_bot_token
+ADMIN_ID=your_id
+DATABASE_URL=postgresql://[user].[project_id]:[pass]@aws-1-eu-west-1.pooler.supabase.com:6543/postgres
 PORT=10000
-
-```
-
-### 3. Run Locally
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the bot
-python bot.py
 
 ```
 
@@ -124,29 +82,25 @@ python bot.py
 
 | Command | Description |
 | --- | --- |
-| `/start` | Registers the user in the database and shows the welcome guide. |
-| `/sethome <name>` | Search and set your **Home** station (e.g., `/sethome Bad Birnbach`). |
-| `/setwork <name>` | Search and set your **Work/Uni** station (e.g., `/setwork Pfarrkirchen`). |
-| `/mode <day/night>` | Toggle your shift type. Useful for night-shift workers. |
-| `/check` | Manually triggers an instant schedule check for your current route. |
+| `/start` | Register and see the setup guide. |
+| `/sethome <name>` | Set your Home station (e.g., `/sethome Passau`). |
+| `/setwork <name>` | Set your Work station (e.g., `/setwork Mühldorf`). |
+| `/setuni <name>` | Set your University station (e.g., `/setuni Deggendorf`). |
+| `/time <hour>` | Set your shift start time (e.g., `/time 9`). |
+| `/mode` | Toggle between **Day** and **Night** shift logic. |
+| `/check` | **Instant Check:** Shows the nearest train/bus for your current route. |
 
 ---
 
 ## 🔮 Future Roadmap
 
-* [ ] **Push Notifications:** Alert only when a delay > 10 mins occurs (Silent mode otherwise).
-* [ ] **Subscription Model:** Integration with Stripe for premium features.
-* [ ] **Calendar Sync:** Sync train times with Google Calendar.
-* [ ] **GPS Support:** "Take me home" feature using live location.
-
----
-
-## ⚖️ Disclaimer
-
-This project uses the public **Deutsche Bahn API (v6)**. It is an independent project and is not affiliated with Deutsche Bahn AG.
+* [ ] **Multi-Station Support:** Adding support for more than two destinations.
+* [ ] **Silent Hours:** Customizable "Do Not Disturb" settings.
+* [ ] **Delay History:** Statistics on line reliability.
 
 ---
 
 **Maintained by:** Chameesha Ravindu
 **License:** MIT
 
+---
