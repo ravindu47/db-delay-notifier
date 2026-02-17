@@ -61,11 +61,11 @@ The bot parses complex API data to provide specific alerts:
 
 ```mermaid
 graph TD
-    User[Telegram User] -->|Commands| Bot[CommuteBot Python]
-    Bot -->|Read and Write| DB[(Supabase Database)]
-    Bot -->|Fetch Schedule| API[Deutsche Bahn API]
-    API -->|JSON Data| Bot
-    Bot -->|Formatted Alert| User
+    A[Telegram User] --> B[CommuteBot]
+    B --> C[Supabase DB]
+    B --> D[DB API]
+    D --> B
+    B --> A
 ```
 
 ---
