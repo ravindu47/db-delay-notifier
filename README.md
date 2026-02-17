@@ -55,14 +55,33 @@ It is architected as a **SaaS (Software as a Service)** application, capable of 
 
 ---
 
-## 🛠️ Deployment Guide (From Scratch)
+## 🛠️ Deployment Guide (Step-by-Step)
 
-Follow these steps to deploy the bot on **Render** with **Supabase**.
+Follow these steps to deploy the bot from scratch.
 
-### Phase 1: Database Setup (Supabase)
+### Phase 1: Create Telegram Bot & Get IDs
+
+Before coding, you need to register the bot on Telegram.
+
+1. **Get Bot Token:**
+* Open Telegram and search for **@BotFather**.
+* Send the command `/newbot`.
+* Give your bot a **Name** (e.g., `My Commute Helper`).
+* Give it a **Username** (must end in `bot`, e.g., `PassauCommuteBot`).
+* **Copy the HTTP API Token** (You will need this for the `TELEGRAM_TOKEN`).
+
+
+2. **Get Your Admin ID:**
+* Search for **@userinfobot** on Telegram.
+* Click Start. It will reply with your `Id`.
+* **Copy this Number** (You will need this for `ADMIN_ID`).
+
+
+
+### Phase 2: Database Setup (Supabase)
 
 1. Create a free project at [supabase.com]().
-2. Go to the **SQL Editor** and run this schema:
+2. Go to the **SQL Editor** (on the left sidebar) and run this code:
 
 ```sql
 CREATE TABLE users (
@@ -78,16 +97,16 @@ CREATE TABLE users (
 ```
 
 3. Go to **Settings > Database > Connection Pooler**.
-4. Change Mode to **Transaction**.
+4. Change **Pool Mode** to `Transaction`.
 5. Copy the **Connection String (URI)** and replace port `5432` with `6543`.
 * *Format:* `postgresql://[user].[project]:[pass]@[host]:6543/postgres`
 
 
 
-### Phase 2: Render Deployment (Hosting)
+### Phase 3: Render Deployment (Hosting)
 
-1. Push your code to **GitHub**.
-2. Log in to [dashboard.render.com]() and create a **New Web Service**.
+1. Push your code (`bot.py`, `requirements.txt`, etc.) to **GitHub**.
+2. Log in to [dashboard.render.com]() and click **New + > Web Service**.
 3. Connect your GitHub repository.
 4. **Configure Settings:**
 * **Runtime:** Python 3
@@ -100,12 +119,12 @@ Add the following variables in the "Environment" tab:
 
 | Key | Value |
 | --- | --- |
-| `TELEGRAM_TOKEN` | Your Bot Token from @BotFather |
-| `DATABASE_URL` | Your Supabase URI (Port 6543) |
-| `ADMIN_ID` | Your Telegram User ID |
+| `TELEGRAM_TOKEN` | Paste the token from BotFather here |
+| `DATABASE_URL` | Paste your Supabase URI (Port 6543) here |
+| `ADMIN_ID` | Paste your User ID here |
 | `PORT` | `10000` |
 
-### Phase 3: Preventing Sleep (The Ping Method)
+### Phase 4: Preventing Sleep (The Ping Method)
 
 Render's free tier spins down after 15 minutes of inactivity. To keep the bot alive 24/7:
 
