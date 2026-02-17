@@ -18,19 +18,17 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- FLASK SERVER ---
+# --- FLASK SERVER (Keep-Alive) ---
 server = Flask(__name__)
 @server.route('/')
 def index(): return "🚆 Hybrid CommuteBot Pro is Active!"
 
 def run_web_server():
-    # Attempting to bind to the correct port for Render
     port = int(os.environ.get('PORT', 10000))
     server.run(host='0.0.0.0', port=port)
 
 # --- DATABASE FUNCTIONS ---
 def get_db_connection():
-    # Use Pooler Port 6543 for stability
     return psycopg2.connect(DB_URL, connect_timeout=10)
 
 def upsert_user(chat_id, home_id=None, home_name=None, work_id=None, work_name=None, uni_id=None, uni_name=None, shift_type=None, start_hour=None):
@@ -107,11 +105,17 @@ async def get_commute_plan(user):
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
     hour = now.hour
     
-    morning_start, morning_end = (start_hour - 2) % 24, (start_hour + 6) % 24
-    is_morning = morning_start <= hour < morning_end if morning_start < morning_end else hour >= morning_start or hour < morning_end
+    morning_start = (start_hour - 2) % 24
+    morning_end = (start_hour + 6) % 24
+    
+    if morning_start < morning_end:
+        is_morning = morning_start <= hour < morning_end
+    else:
+        is_morning = hour >= morning_start or hour < morning_end
     
     going_to_dest = is_morning if s_type == 'day' else not is_morning
     routes = []
+    
     if going_to_dest:
         if w_id: routes.append({"label": "To Work", "from": h_id, "to": w_id})
         if u_id: routes.append({"label": "To Uni", "from": h_id, "to": u_id})
@@ -125,32 +129,25 @@ async def get_commute_plan(user):
 # --- HANDLERS ---
 
 async def post_init(application: Application):
-    """
-    FIX: This runs AFTER the event loop is created but BEFORE the bot starts polling.
-    This prevents the 'RuntimeError: There is no current event loop' crash.
-    """
+    """Sets commands after bot init to avoid loop errors"""
     commands = [
-        BotCommand("start", "Start the bot & register"),
-        BotCommand("check", "Check next Work/Uni connection"),
-        BotCommand("sethome", "Set your Home station"),
-        BotCommand("setwork", "Set your Work station"),
-        BotCommand("setuni", "Set your Uni station"),
-        BotCommand("time", "Set Work Start Hour (e.g. /time 8)"),
-        BotCommand("mode", "Toggle Day/Night Shift mode")
+        BotCommand("start", "Start & Register"),
+        BotCommand("check", "Instant Check"),
+        BotCommand("sethome", "Set Home Station"),
+        BotCommand("setwork", "Set Work Station"),
+        BotCommand("setuni", "Set Uni Station"),
+        BotCommand("time", "Set Work Hour (/time 8)"),
+        BotCommand("mode", "Toggle Day/Night Shift")
     ]
     await application.bot.set_my_commands(commands)
-    logger.info("✅ Menu commands set successfully via post_init!")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     upsert_user(chat_id)
     await update.message.reply_text(
         "👋 **Welcome to Hybrid CommuteBot Pro!**\n\n"
-        "I track both your Uni and Work schedules. Use the / menu to setup.\n\n"
-        "🚀 **Setup:**\n"
-        "1️⃣ `/sethome <name>`\n"
-        "2️⃣ `/setwork <name>` and/or `/setuni <name>`\n"
-        "3️⃣ `/time <hour>` (e.g., `/time 9` for 9 AM start)"
+        "Use the Menu button to setup stations and time.\n"
+        "Example: `/time 8` sets your start time to 08:00."
     )
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,4 +167,67 @@ async def set_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         h = int(context.args[0])
         if 0 <= h <= 23:
-            upsert_user(update.message.chat_id
+            # Fixed Syntax Error Here: ensure parenthesis is closed
+            upsert_user(update.message.chat_id, start_hour=h)
+            await update.message.reply_text(f"🕒 Start Time set to: **{h}:00**.")
+        else: raise ValueError
+    except: await update.message.reply_text("⚠️ Usage: `/time 8` (for 8 AM).")
+
+async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_user(update.message.chat_id)
+    current_mode = user[7] if user and user[7] else 'day'
+    new_mode = 'night' if current_mode == 'day' else 'day'
+    # Fixed Syntax Error Here: ensure parenthesis is closed
+    upsert_user(update.message.chat_id, shift_type=new_mode)
+    await update.message.reply_text(f"🔄 Mode: **{new_mode.upper()} Shift**")
+
+async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = " ".join(context.args)
+    if not query: return
+    url = f"https://v6.db.transport.rest/locations?query={quote(query)}&results=3"
+    try:
+        res = requests.get(url, timeout=10).json()
+        if not res: return
+        cmd = update.message.text.split()[0][1:]
+        btns = [[InlineKeyboardButton(s['name'], callback_data=f"{cmd}:{s['id']}:{s['name']}")] for s in res]
+        await update.message.reply_text("🔍 Select Station:", reply_markup=InlineKeyboardMarkup(btns))
+    except: pass
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    cmd, sid, sname = q.data.split(':')
+    if cmd == "sethome": upsert_user(q.message.chat_id, home_id=sid, home_name=sname)
+    elif cmd == "setwork": upsert_user(q.message.chat_id, work_id=sid, work_name=sname)
+    elif cmd == "setuni": upsert_user(q.message.chat_id, uni_id=sid, uni_name=sname)
+    await q.edit_message_text(f"✅ **{cmd[3:].capitalize()}** set to: **{sname}**")
+
+async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
+    for u in get_all_users():
+        routes, _ = await get_commute_plan(u)
+        if not routes: continue
+        alerts = []
+        for r in routes:
+            js = get_journey(r['from'], r['to'])
+            if not js: continue
+            max_d = max((l.get('departureDelay', 0) or 0) for l in js[0].get('legs', []))
+            if max_d > 300 or any(l.get('cancelled') for l in js[0].get('legs', [])):
+                alerts.append(format_route_status(js, r['label']))
+        if alerts: await context.bot.send_message(u[0], "🔔 **Alert**\n\n" + "\n\n".join(alerts), parse_mode='Markdown')
+
+if __name__ == '__main__':
+    Thread(target=run_web_server, daemon=True).start()
+    # Corrected Post Init call
+    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('sethome', search_station))
+    app.add_handler(CommandHandler('setwork', search_station))
+    app.add_handler(CommandHandler('setuni', search_station))
+    app.add_handler(CommandHandler('time', set_time))
+    app.add_handler(CommandHandler('mode', toggle_mode))
+    app.add_handler(CommandHandler('check', check_command))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    
+    if app.job_queue: app.job_queue.run_repeating(check_all_users, interval=900, first=10)
+    app.run_polling()
