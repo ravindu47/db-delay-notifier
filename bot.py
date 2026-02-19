@@ -49,66 +49,95 @@ def upsert_user(chat_id, home_id=None, home_name=None, work_id=None, work_name=N
         logger.error(f"❌ DB Error: {e}")
         return False
 
-# --- STATION SEARCH LOGIC ---
-
-async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args)
-    command = update.message.text.split()[0][1:] # Get command without / (sethome, setwork, etc)
-    
-    # Handle empty input
-    if not query:
-        await update.message.reply_text(
-            f"⚠️ **Usage Error**\n\nPlease provide a station name.\nExample: `/{command} Pfarrkirchen`",
-            parse_mode='Markdown'
-        )
-        return
-
-    url = f"https://v6.db.transport.rest/locations?query={quote(query)}&results=3"
-    
+def get_user(chat_id):
     try:
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        response = requests.get(url, timeout=10)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id, home_id, home_name, work_id, work_name, uni_id, uni_name, shift_type, start_hour FROM users WHERE chat_id = %s", (chat_id,))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+        return user
+    except: return None
+
+def get_all_users():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT chat_id, home_id, home_name, work_id, work_name, uni_id, uni_name, shift_type, start_hour FROM users")
+        users = cur.fetchall()
+        cur.close()
+        conn.close()
+        return users
+    except: return []
+
+# --- API & FORMATTING ---
+def get_journey(from_id, to_id):
+    try:
+        url = f"https://v6.db.transport.rest/journeys?from={from_id}&to={to_id}&results=1&transfers=1"
+        response = requests.get(url, timeout=15)
         response.raise_for_status()
-        res = response.json()
-        
-        if not res:
-            await update.message.reply_text(
-                f"🔍 **Station Not Found**\n\nCould not find any station named '{query}'. Please check the spelling and try again.",
-                parse_mode='Markdown'
-            )
-            return
+        return response.json().get('journeys', [])
+    except Exception as e:
+        logger.error(f"Journey API Error: {e}")
+        return None
 
-        btns = [[InlineKeyboardButton(s['name'], callback_data=f"{command}:{s['id']}:{s['name']}")] for s in res if 'id' in s]
-        
-        if not btns:
-            await update.message.reply_text("⚠️ No valid stations found. Try a different name.")
-            return
-            
-        await update.message.reply_text(
-            "📍 **Select the correct station:**",
-            reply_markup=InlineKeyboardMarkup(btns),
-            parse_mode='Markdown'
-        )
+def format_route_status(journeys, label):
+    if journeys is None: return f"📍 *{label}:* ⚠️ API Connection Error."
+    if not journeys: return f"📍 *{label}:* ⚠️ No connection found."
+    j = journeys[0]
+    legs = j.get('legs', [])
+    dep = legs[0].get('departure', '')[11:16]
+    arr = legs[-1].get('arrival', '')[11:16]
+    max_delay = max((leg.get('departureDelay', 0) or 0) for leg in legs)
+    is_cancelled = any(leg.get('cancelled') for leg in legs)
+    
+    if is_cancelled: status = "❌ *CANCELLED*"
+    elif max_delay > 60: status = f"⚠️ *Delay +{int(max_delay/60)} min*"
+    else: status = "✅ *No Delays*"
 
-    except requests.exceptions.RequestException as e:
-        logger.error(f"API Connection Error: {e}")
-        await update.message.reply_text(
-            "🛑 **Service Unavailable**\n\nThe Deutsche Bahn API is currently unreachable. Please try again in a few minutes.",
-            parse_mode='Markdown'
-        )
+    plat = legs[0].get('platform')
+    route_str = " ➔ ".join([l.get('line', {}).get('name', 'Train') for l in legs])
+    return f"📍 *{label}* ({dep} - {arr})\nStatus: {status}\n🚆 {route_str} (Gl. {plat})"
 
-# --- SYSTEM NOTIFICATION ---
+# --- LOGIC ENGINE ---
+async def get_commute_plan(user):
+    _, h_id, h_name, w_id, w_name, u_id, u_name, s_type, start_hour = user
+    if not h_id: return None, "Please set Home station first."
+    if not w_id and not u_id: return None, "Please set Work or Uni station."
+    
+    start_hour = start_hour if start_hour is not None else 8
+    now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+    hour = now.hour
+    
+    morning_start = (start_hour - 2) % 24
+    morning_end = (start_hour + 6) % 24
+    
+    if morning_start < morning_end:
+        is_morning = morning_start <= hour < morning_end
+    else:
+        is_morning = hour >= morning_start or hour < morning_end
+    
+    going_to_dest = is_morning if s_type == 'day' else not is_morning
+    routes = []
+    
+    if going_to_dest:
+        if w_id: routes.append({"label": "To Work", "from": h_id, "to": w_id})
+        if u_id: routes.append({"label": "To Uni", "from": h_id, "to": u_id})
+        header = "🌅 *Morning Commute*"
+    else:
+        if w_id: routes.append({"label": "Return Home (Work)", "from": w_id, "to": h_id})
+        if u_id: routes.append({"label": "Return Home (Uni)", "from": u_id, "to": h_id})
+        header = "🌙 *Evening Return*"
+    return routes, header
+
+# --- HANDLERS ---
 
 async def post_init(application: Application):
-    # Notify Admin when server is up
     if ADMIN_ID != 0:
         try:
-            await application.bot.send_message(
-                chat_id=ADMIN_ID, 
-                text="🚀 **System Online**\nHybrid CommuteBot Pro is up and running. Connection to DB and API established."
-            )
-        except Exception as e:
-            logger.error(f"Failed to send bootup alert: {e}")
+            await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 **System Online**\nCommuteBot is now active and monitoring.")
+        except: pass
     
     commands = [
         BotCommand("start", "Start & Register"),
@@ -121,19 +150,104 @@ async def post_init(application: Application):
     ]
     await application.bot.set_my_commands(commands)
 
-# --- MAIN APP SETUP ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    upsert_user(chat_id)
+    await update.message.reply_text(
+        "👋 *Welcome to Hybrid CommuteBot Pro!*\n\n"
+        "Use the Menu button to setup stations and time.\n"
+        "Example: `/time 8` sets your start time to 08:00.",
+        parse_mode='Markdown'
+    )
+
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    user = get_user(chat_id)
+    if not user: return
+    routes, header = await get_commute_plan(user)
+    if not routes:
+        await update.message.reply_text(f"⚠️ {header}", parse_mode='Markdown')
+        return
+    final_msg = [header]
+    for r in routes:
+        final_msg.append(format_route_status(get_journey(r['from'], r['to']), r['label']))
+    await update.message.reply_text("\n\n".join(final_msg), parse_mode='Markdown')
+
+async def set_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        h = int(context.args[0])
+        if 0 <= h <= 23:
+            upsert_user(update.message.chat_id, start_hour=h)
+            await update.message.reply_text(f"🕒 Start Time set to: *{h}:00*.", parse_mode='Markdown')
+        else: raise ValueError
+    except: await update.message.reply_text("⚠️ Usage: `/time 8` (for 8 AM).", parse_mode='Markdown')
+
+async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = get_user(update.message.chat_id)
+    current_mode = user[7] if user and user[7] else 'day'
+    new_mode = 'night' if current_mode == 'day' else 'day'
+    upsert_user(update.message.chat_id, shift_type=new_mode)
+    await update.message.reply_text(f"🔄 Mode: *{new_mode.upper()} Shift*", parse_mode='Markdown')
+
+async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = " ".join(context.args)
+    cmd = update.message.text.split()[0][1:]
+    
+    if not query:
+        await update.message.reply_text(f"⚠️ **Usage Error**\nPlease provide a station name.\nExample: `/{cmd} Pfarrkirchen`", parse_mode='Markdown')
+        return
+
+    url = f"https://v6.db.transport.rest/locations?query={quote(query)}&results=3"
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        res = response.json()
+        
+        if not res:
+            await update.message.reply_text(f"🔍 **Not Found**\nNo station found for '{query}'.", parse_mode='Markdown')
+            return
+            
+        btns = [[InlineKeyboardButton(s['name'], callback_data=f"{cmd}:{s['id']}:{s['name']}")] for s in res if 'id' in s]
+        await update.message.reply_text("🔍 Select Station:", reply_markup=InlineKeyboardMarkup(btns))
+    except Exception as e:
+        logger.error(f"Search API Error: {e}")
+        await update.message.reply_text("🛑 **API Error**\nTransport service is currently unreachable.", parse_mode='Markdown')
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    cmd, sid, sname = q.data.split(':')
+    if cmd == "sethome": upsert_user(q.message.chat_id, home_id=sid, home_name=sname)
+    elif cmd == "setwork": upsert_user(q.message.chat_id, work_id=sid, work_name=sname)
+    elif cmd == "setuni": upsert_user(q.message.chat_id, uni_id=sid, uni_name=sname)
+    await q.edit_message_text(f"✅ **{cmd[3:].capitalize()}** set to: *{sname}*", parse_mode='Markdown')
+
+async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
+    for u in get_all_users():
+        routes, _ = await get_commute_plan(u)
+        if not routes: continue
+        alerts = []
+        for r in routes:
+            js = get_journey(r['from'], r['to'])
+            if not js: continue
+            max_d = max((l.get('departureDelay', 0) or 0) for l in js[0].get('legs', []))
+            if max_d > 300 or any(l.get('cancelled') for l in js[0].get('legs', [])):
+                alerts.append(format_route_status(js, r['label']))
+        if alerts: await context.bot.send_message(u[0], "🔔 *Alert*\n\n" + "\n\n".join(alerts), parse_mode='Markdown')
 
 if __name__ == '__main__':
     Thread(target=run_web_server, daemon=True).start()
-    
-    # Initialize Application
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     
-    # Add Handlers
-    app.add_handler(CommandHandler('start', start)) # Reference your existing start function
+    app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('sethome', search_station))
     app.add_handler(CommandHandler('setwork', search_station))
     app.add_handler(CommandHandler('setuni', search_station))
-    # ... Add your other handlers (set_time, toggle_mode, button_callback, etc.) ...
+    app.add_handler(CommandHandler('time', set_time))
+    app.add_handler(CommandHandler('mode', toggle_mode))
+    app.add_handler(CommandHandler('check', check_command))
+    app.add_handler(CallbackQueryHandler(button_callback))
     
+    if app.job_queue: app.job_queue.run_repeating(check_all_users, interval=900, first=10)
     app.run_polling()
