@@ -14,6 +14,15 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DB_URL = os.environ.get("DATABASE_URL") 
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
+# Increased to 5 mirrors for maximum stability
+API_URLS = [
+    "https://v6.db.transport.rest",
+    "https://db.transport.rest",
+    "https://v6.db.api.transport.rest",
+    "https://transport.rest",
+    "https://v5.db.transport.rest"
+]
+
 # --- LOGGING ---
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,6 +35,20 @@ def index(): return "🚆 Hybrid CommuteBot Pro is Active!"
 def run_web_server():
     port = int(os.environ.get('PORT', 10000))
     server.run(host='0.0.0.0', port=port)
+
+# --- FAILOVER API CALLER ---
+def call_db_api(endpoint):
+    for base_url in API_URLS:
+        try:
+            url = f"{base_url}{endpoint}"
+            response = requests.get(url, timeout=10) # 10s timeout per server
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.warning(f"Server {base_url} status {response.status_code}. Retrying...")
+        except Exception as e:
+            logger.warning(f"Server {base_url} exception: {e}. Retrying...")
+    return None
 
 # --- DATABASE FUNCTIONS ---
 def get_db_connection():
@@ -73,18 +96,13 @@ def get_all_users():
 
 # --- API & FORMATTING ---
 def get_journey(from_id, to_id):
-    try:
-        url = f"https://v6.db.transport.rest/journeys?from={from_id}&to={to_id}&results=1&transfers=1"
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        return response.json().get('journeys', [])
-    except Exception as e:
-        logger.error(f"Journey API Error: {e}")
-        return None
+    endpoint = f"/journeys?from={from_id}&to={to_id}&results=1&transfers=1"
+    data = call_db_api(endpoint)
+    return data.get('journeys', []) if data else None
 
 def format_route_status(journeys, label):
-    if journeys is None: return f"📍 *{label}:* ⚠️ API Connection Error."
-    if not journeys: return f"📍 *{label}:* ⚠️ No connection found."
+    if journeys is None: return f"📍 *{label}:* ⚠️ System overloaded. All mirrors failing."
+    if not journeys: return f"📍 *{label}:* ⚠️ No journeys found currently."
     j = journeys[0]
     legs = j.get('legs', [])
     dep = legs[0].get('departure', '')[11:16]
@@ -96,27 +114,22 @@ def format_route_status(journeys, label):
     elif max_delay > 60: status = f"⚠️ *Delay +{int(max_delay/60)} min*"
     else: status = "✅ *No Delays*"
 
-    plat = legs[0].get('platform')
+    plat = legs[0].get('platform', 'N/A')
     route_str = " ➔ ".join([l.get('line', {}).get('name', 'Train') for l in legs])
     return f"📍 *{label}* ({dep} - {arr})\nStatus: {status}\n🚆 {route_str} (Gl. {plat})"
 
 # --- LOGIC ENGINE ---
 async def get_commute_plan(user):
     _, h_id, h_name, w_id, w_name, u_id, u_name, s_type, start_hour = user
-    if not h_id: return None, "Please set Home station first."
-    if not w_id and not u_id: return None, "Please set Work or Uni station."
+    if not h_id: return None, "Set your Home station first."
+    if not w_id and not u_id: return None, "Set your Work or Uni station."
     
     start_hour = start_hour if start_hour is not None else 8
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
     hour = now.hour
     
-    morning_start = (start_hour - 2) % 24
-    morning_end = (start_hour + 6) % 24
-    
-    if morning_start < morning_end:
-        is_morning = morning_start <= hour < morning_end
-    else:
-        is_morning = hour >= morning_start or hour < morning_end
+    m_start, m_end = (start_hour - 2) % 24, (start_hour + 6) % 24
+    is_morning = m_start <= hour < m_end if m_start < m_end else hour >= m_start or hour < m_end
     
     going_to_dest = is_morning if s_type == 'day' else not is_morning
     routes = []
@@ -124,45 +137,49 @@ async def get_commute_plan(user):
     if going_to_dest:
         if w_id: routes.append({"label": "To Work", "from": h_id, "to": w_id})
         if u_id: routes.append({"label": "To Uni", "from": h_id, "to": u_id})
-        header = "🌅 *Morning Commute*"
+        header = "🌅 *Morning Commute Update*"
     else:
         if w_id: routes.append({"label": "Return Home (Work)", "from": w_id, "to": h_id})
         if u_id: routes.append({"label": "Return Home (Uni)", "from": u_id, "to": h_id})
-        header = "🌙 *Evening Return*"
+        header = "🌙 *Evening Return Update*"
     return routes, header
 
 # --- HANDLERS ---
 
-async def post_init(application: Application):
-    if ADMIN_ID != 0:
-        try:
-            await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 **System Online**\nCommuteBot is now active and monitoring.")
-        except: pass
-    
-    commands = [
-        BotCommand("start", "Start & Register"),
-        BotCommand("check", "Instant Check"),
-        BotCommand("sethome", "Set Home Station"),
-        BotCommand("setwork", "Set Work Station"),
-        BotCommand("setuni", "Set Uni Station"),
-        BotCommand("time", "Set Work Hour (/time 8)"),
-        BotCommand("mode", "Toggle Day/Night Shift")
-    ]
-    await application.bot.set_my_commands(commands)
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    upsert_user(chat_id)
+    upsert_user(update.message.chat_id)
     await update.message.reply_text(
-        "👋 *Welcome to Hybrid CommuteBot Pro!*\n\n"
-        "Use the Menu button to setup stations and time.\n"
-        "Example: `/time 8` sets your start time to 08:00.",
+        "👋 *CommuteBot Pro Active*\n\n"
+        "Configured with 5 API mirrors for maximum reliability.\n"
+        "Use /sethome, /setwork, or /setuni to register stations.",
         parse_mode='Markdown'
     )
 
+async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = " ".join(context.args)
+    cmd = update.message.text.split()[0][1:]
+    
+    if not query:
+        await update.message.reply_text(f"⚠️ *Empty Command*\nPlease provide a station name.\nExample: `/{cmd} Pfarrkirchen`", parse_mode='Markdown')
+        return
+
+    endpoint = f"/locations?query={quote(query)}&results=3"
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    res = call_db_api(endpoint)
+    
+    if not res:
+        await update.message.reply_text("🛑 *Network Error*\nCould not reach any DB servers. Please try again shortly.", parse_mode='Markdown')
+        return
+            
+    btns = [[InlineKeyboardButton(s['name'], callback_data=f"{cmd}:{s['id']}:{s['name']}")] for s in res if 'id' in s]
+    if not btns:
+        await update.message.reply_text("🔍 *Not Found*\nTry a different station name.", parse_mode='Markdown')
+        return
+            
+    await update.message.reply_text("🔍 *Select Station:*", reply_markup=InlineKeyboardMarkup(btns), parse_mode='Markdown')
+
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    user = get_user(chat_id)
+    user = get_user(update.message.chat_id)
     if not user: return
     routes, header = await get_commute_plan(user)
     if not routes:
@@ -178,41 +195,15 @@ async def set_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         h = int(context.args[0])
         if 0 <= h <= 23:
             upsert_user(update.message.chat_id, start_hour=h)
-            await update.message.reply_text(f"🕒 Start Time set to: *{h}:00*.", parse_mode='Markdown')
+            await update.message.reply_text(f"🕒 Time set to: *{h}:00*.", parse_mode='Markdown')
         else: raise ValueError
-    except: await update.message.reply_text("⚠️ Usage: `/time 8` (for 8 AM).", parse_mode='Markdown')
+    except: await update.message.reply_text("⚠️ Use: `/time 8`.", parse_mode='Markdown')
 
 async def toggle_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(update.message.chat_id)
-    current_mode = user[7] if user and user[7] else 'day'
-    new_mode = 'night' if current_mode == 'day' else 'day'
+    new_mode = 'night' if (user[7] if user else 'day') == 'day' else 'day'
     upsert_user(update.message.chat_id, shift_type=new_mode)
     await update.message.reply_text(f"🔄 Mode: *{new_mode.upper()} Shift*", parse_mode='Markdown')
-
-async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args)
-    cmd = update.message.text.split()[0][1:]
-    
-    if not query:
-        await update.message.reply_text(f"⚠️ **Usage Error**\nPlease provide a station name.\nExample: `/{cmd} Pfarrkirchen`", parse_mode='Markdown')
-        return
-
-    url = f"https://v6.db.transport.rest/locations?query={quote(query)}&results=3"
-    try:
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        res = response.json()
-        
-        if not res:
-            await update.message.reply_text(f"🔍 **Not Found**\nNo station found for '{query}'.", parse_mode='Markdown')
-            return
-            
-        btns = [[InlineKeyboardButton(s['name'], callback_data=f"{cmd}:{s['id']}:{s['name']}")] for s in res if 'id' in s]
-        await update.message.reply_text("🔍 Select Station:", reply_markup=InlineKeyboardMarkup(btns))
-    except Exception as e:
-        logger.error(f"Search API Error: {e}")
-        await update.message.reply_text("🛑 **API Error**\nTransport service is currently unreachable.", parse_mode='Markdown')
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -221,7 +212,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cmd == "sethome": upsert_user(q.message.chat_id, home_id=sid, home_name=sname)
     elif cmd == "setwork": upsert_user(q.message.chat_id, work_id=sid, work_name=sname)
     elif cmd == "setuni": upsert_user(q.message.chat_id, uni_id=sid, uni_name=sname)
-    await q.edit_message_text(f"✅ **{cmd[3:].capitalize()}** set to: *{sname}*", parse_mode='Markdown')
+    await q.edit_message_text(f"✅ *{cmd[3:].capitalize()}* set to: *{sname}*", parse_mode='Markdown')
 
 async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
     for u in get_all_users():
@@ -234,7 +225,24 @@ async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
             max_d = max((l.get('departureDelay', 0) or 0) for l in js[0].get('legs', []))
             if max_d > 300 or any(l.get('cancelled') for l in js[0].get('legs', [])):
                 alerts.append(format_route_status(js, r['label']))
-        if alerts: await context.bot.send_message(u[0], "🔔 *Alert*\n\n" + "\n\n".join(alerts), parse_mode='Markdown')
+        if alerts: await context.bot.send_message(u[0], "🔔 *Travel Alert*\n\n" + "\n\n".join(alerts), parse_mode='Markdown')
+
+async def post_init(application: Application):
+    if ADMIN_ID != 0:
+        try:
+            await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 *System Online*\n5-Mirror Failover enabled.")
+        except: pass
+    
+    commands = [
+        BotCommand("start", "Initialize"),
+        BotCommand("check", "Check Now"),
+        BotCommand("sethome", "Home Station"),
+        BotCommand("setwork", "Work Station"),
+        BotCommand("setuni", "Uni Station"),
+        BotCommand("time", "Start Time"),
+        BotCommand("mode", "Day/Night")
+    ]
+    await application.bot.set_my_commands(commands)
 
 if __name__ == '__main__':
     Thread(target=run_web_server, daemon=True).start()
