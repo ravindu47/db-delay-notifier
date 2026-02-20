@@ -16,11 +16,21 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DB_URL = os.environ.get("DATABASE_URL") 
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-# ULTIMATE STABILITY MIRRORS
-# Removed regional mirrors (BVG/VBN) because they return wrong locations for Bavaria
+# National DB Mirrors Only (To get accurate Bavaria data)
 API_URLS = [
-    "https://v6.db.transport.rest",    # Main DB V6 (National - MUST BE FIRST)
-    "https://v5.db.transport.rest"     # Main DB V5 Fallback (National)
+    "https://v6.db.transport.rest",
+    "https://v5.db.transport.rest",
+    "https://db.transport.rest"
+]
+
+# --- STEALTH BROWSER SPOOFING ---
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"
 ]
 
 # --- LOGGING ---
@@ -32,7 +42,7 @@ server = Flask(__name__)
 
 @server.route('/')
 def index(): 
-    return "🚆 Hybrid CommuteBot Pro is Online!"
+    return "🚆 Hybrid CommuteBot Pro (Stealth Mode) is Online!"
 
 @server.route('/health')
 def health():
@@ -42,28 +52,39 @@ def run_web_server():
     port = int(os.environ.get('PORT', 10000))
     server.run(host='0.0.0.0', port=port)
 
-# --- ENHANCED FAILOVER API CALLER ---
+# --- STEALTH API CALLER ---
 def call_db_api(endpoint):
     sep = "&" if "?" in endpoint else "?"
     final_endpoint = f"{endpoint}{sep}profile=dbweb"
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'application/json'
+    # Randomly pick a browser to spoof
+    stealth_headers = {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7', # Pretend to be from Germany
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'cross-site'
     }
 
     for base_url in API_URLS:
         try:
             url = f"{base_url}{final_endpoint}"
-            time.sleep(random.uniform(1.0, 2.0))
             
-            response = requests.get(url, headers=headers, timeout=20) 
+            # Unpredictable human-like delay
+            time.sleep(random.uniform(1.2, 3.5))
+            
+            response = requests.get(url, headers=stealth_headers, timeout=20) 
             
             if response.status_code == 200:
+                logger.info(f"✅ Stealth success on {base_url}")
                 return response.json()
             elif response.status_code == 429:
-                logger.warning(f"Rate limited by {base_url}. Skipping...")
+                logger.warning(f"Rate limited by {base_url}.")
                 continue
+            else:
+                logger.warning(f"Mirror {base_url} status: {response.status_code}")
         except Exception as e:
             logger.warning(f"Mirror {base_url} failed: {e}")
             
@@ -169,7 +190,8 @@ async def get_commute_plan(user):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.message.chat_id)
     await update.message.reply_text(
-        "👋 *CommuteBot Pro Online*\n\n"
+        "👋 *CommuteBot Pro Stealth Mode*\n\n"
+        "Anti-blocking headers active.\n"
         "Commands: /sethome, /setwork, /setuni, /check, /time, /mode",
         parse_mode='Markdown'
     )
@@ -182,10 +204,10 @@ async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    res = call_db_api(f"/locations?query={quote(query)}&results=5")
+    res = call_db_api(f"/locations?query={quote(query)}&results=4")
     
     if not res:
-        await update.message.reply_text("🛑 *API Error*\nPlease try again in 30 seconds.", parse_mode='Markdown')
+        await update.message.reply_text("🛑 *API Blocked*\nRender IP is temporarily restricted. Wait 5 mins.", parse_mode='Markdown')
         return
             
     btns = []
@@ -193,9 +215,9 @@ async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 'id' in s:
             raw_id = str(s['id'])
             raw_name = s['name']
-            
             cb_string = f"{cmd}:{raw_id}:{raw_name}"
             
+            # Safe truncation for Telegram 64-byte limit
             while len(cb_string.encode('utf-8')) > 64:
                 raw_name = raw_name[:-1]
                 cb_string = f"{cmd}:{raw_id}:{raw_name}"
@@ -254,11 +276,11 @@ async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
             legs = js[0].get('legs', [])
             if any(l.get('cancelled') or (l.get('departureDelay', 0) or 0) > 300 for l in legs):
                 alerts.append(format_route_status(js, r['label']))
-            time.sleep(3) 
+            time.sleep(4) 
         if alerts:
             try: await context.bot.send_message(u[0], "🔔 *Travel Alert*\n\n" + "\n\n".join(alerts), parse_mode='Markdown')
             except: pass
-        time.sleep(5)
+        time.sleep(15)
 
 async def post_init(application: Application):
     commands = [
