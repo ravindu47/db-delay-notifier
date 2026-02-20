@@ -16,8 +16,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DB_URL = os.environ.get("DATABASE_URL") 
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-# ULTIMATE STABILITY MIRRORS: Using multiple regional backends
-# These all use HAFAS, so they provide German (DB) data even if DB's own server is down.
+# ULTIMATE STABILITY MIRRORS
 API_URLS = [
     "https://v6.vbn.transport.rest",   # Northern Germany - Very stable
     "https://v6.bvg.transport.rest",   # Berlin - High capacity
@@ -34,21 +33,22 @@ server = Flask(__name__)
 
 @server.route('/')
 def index(): 
-    return "🚆 Hybrid CommuteBot Pro (v2.2 Ultimate) is Online!"
+    return "🚆 Hybrid CommuteBot Pro (v2.3 Stable) is Online!"
 
 @server.route('/health')
 def health():
     return "OK", 200
 
 def run_web_server():
-    # Render binding requirement
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"Binding Flask to port {port}")
     server.run(host='0.0.0.0', port=port)
 
 # --- ENHANCED FAILOVER API CALLER ---
 def call_db_api(endpoint):
-    # We test with/without profile based on the mirror
+    sep = "&" if "?" in endpoint else "?"
+    final_endpoint = f"{endpoint}{sep}profile=dbweb"
+    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36',
         'Accept': 'application/json'
@@ -56,17 +56,14 @@ def call_db_api(endpoint):
 
     for base_url in API_URLS:
         try:
-            # Some v6 mirrors prefer generic calls without profile=dbweb
             url = f"{base_url}{endpoint}"
             logger.info(f"Attempting: {base_url}")
-            
-            # Anti-detection delay
             time.sleep(random.uniform(1.0, 2.5))
             
             response = requests.get(url, headers=headers, timeout=20) 
             
             if response.status_code == 200:
-                logger.info(f"✅ Success from {base_url}")
+                logger.info(f"Success from {base_url}")
                 return response.json()
             elif response.status_code == 429:
                 logger.warning(f"Rate limited by {base_url}. Skipping to next...")
@@ -97,7 +94,7 @@ def upsert_user(chat_id, home_id=None, home_name=None, work_id=None, work_name=N
         conn.close()
         return True
     except Exception as e:
-        logger.error(f"❌ DB Error: {e}")
+        logger.error(f"DB Error: {e}")
         return False
 
 def get_user(chat_id):
@@ -154,7 +151,6 @@ async def get_commute_plan(user):
     if not (w_id or u_id): return None, "Please set Work or Uni station."
     
     start_hour = start_hour if start_hour is not None else 8
-    # UTC+1 for Germany
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
     hour = now.hour
     
@@ -179,7 +175,7 @@ async def get_commute_plan(user):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.message.chat_id)
     await update.message.reply_text(
-        "👋 *CommuteBot Pro v2.2 Ultimate*\n\n"
+        "👋 *CommuteBot Pro v2.3 Ultimate*\n\n"
         "Multi-mirror support active. High stability mode.\n"
         "Commands: /sethome, /setwork, /setuni, /check, /time, /mode",
         parse_mode='Markdown'
@@ -199,7 +195,21 @@ async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🛑 *API Error*\nPlease try again in 30 seconds.", parse_mode='Markdown')
         return
             
-    btns = [[InlineKeyboardButton(s['name'], callback_data=f"{cmd}:{s['id']}:{s['name']}")] for s in res if 'id' in s]
+    btns = []
+    for s in res:
+        if 'id' in s:
+            raw_id = str(s['id'])
+            raw_name = s['name']
+            
+            cb_string = f"{cmd}:{raw_id}:{raw_name}"
+            
+            # Prevent Telegram's Button_data_invalid Error (max 64 bytes)
+            while len(cb_string.encode('utf-8')) > 64:
+                raw_name = raw_name[:-1]
+                cb_string = f"{cmd}:{raw_id}:{raw_name}"
+            
+            btns.append([InlineKeyboardButton(s['name'], callback_data=cb_string)])
+            
     await update.message.reply_text("🔍 *Select Station:*", reply_markup=InlineKeyboardMarkup(btns), parse_mode='Markdown')
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -252,7 +262,7 @@ async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
             legs = js[0].get('legs', [])
             if any(l.get('cancelled') or (l.get('departureDelay', 0) or 0) > 300 for l in legs):
                 alerts.append(format_route_status(js, r['label']))
-            time.sleep(5) # Slow down for API health
+            time.sleep(5) 
         if alerts:
             try: await context.bot.send_message(u[0], "🔔 *Travel Alert*\n\n" + "\n\n".join(alerts), parse_mode='Markdown')
             except: pass
@@ -260,7 +270,7 @@ async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     if ADMIN_ID != 0:
-        try: await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 *System v2.2 Live*")
+        try: await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 *System v2.3 Live*")
         except: pass
     
     commands = [
