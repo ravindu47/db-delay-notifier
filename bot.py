@@ -17,23 +17,22 @@ DB_URL = os.environ.get("DATABASE_URL")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 # ULTIMATE STABILITY MIRRORS
+# Removed regional mirrors (BVG/VBN) because they return wrong locations for Bavaria
 API_URLS = [
-    "https://v6.vbn.transport.rest",   # Northern Germany - Very stable
-    "https://v6.bvg.transport.rest",   # Berlin - High capacity
-    "https://v6.db.transport.rest",    # Main DB V6
-    "https://v5.db.transport.rest"     # Main DB V5 Fallback
+    "https://v6.db.transport.rest",    # Main DB V6 (National - MUST BE FIRST)
+    "https://v5.db.transport.rest"     # Main DB V5 Fallback (National)
 ]
 
 # --- LOGGING ---
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- FLASK SERVER (RENDER PORT BINDING FIX) ---
+# --- FLASK SERVER ---
 server = Flask(__name__)
 
 @server.route('/')
 def index(): 
-    return "🚆 Hybrid CommuteBot Pro (v2.3 Stable) is Online!"
+    return "🚆 Hybrid CommuteBot Pro is Online!"
 
 @server.route('/health')
 def health():
@@ -41,7 +40,6 @@ def health():
 
 def run_web_server():
     port = int(os.environ.get('PORT', 10000))
-    logger.info(f"Binding Flask to port {port}")
     server.run(host='0.0.0.0', port=port)
 
 # --- ENHANCED FAILOVER API CALLER ---
@@ -56,22 +54,18 @@ def call_db_api(endpoint):
 
     for base_url in API_URLS:
         try:
-            url = f"{base_url}{endpoint}"
-            logger.info(f"Attempting: {base_url}")
-            time.sleep(random.uniform(1.0, 2.5))
+            url = f"{base_url}{final_endpoint}"
+            time.sleep(random.uniform(1.0, 2.0))
             
             response = requests.get(url, headers=headers, timeout=20) 
             
             if response.status_code == 200:
-                logger.info(f"Success from {base_url}")
                 return response.json()
             elif response.status_code == 429:
-                logger.warning(f"Rate limited by {base_url}. Skipping to next...")
+                logger.warning(f"Rate limited by {base_url}. Skipping...")
                 continue
-            else:
-                logger.warning(f"Mirror {base_url} returned {response.status_code}")
         except Exception as e:
-            logger.warning(f"Mirror {base_url} connection failed: {e}")
+            logger.warning(f"Mirror {base_url} failed: {e}")
             
     return None
 
@@ -175,8 +169,7 @@ async def get_commute_plan(user):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.message.chat_id)
     await update.message.reply_text(
-        "👋 *CommuteBot Pro v2.3 Ultimate*\n\n"
-        "Multi-mirror support active. High stability mode.\n"
+        "👋 *CommuteBot Pro Online*\n\n"
         "Commands: /sethome, /setwork, /setuni, /check, /time, /mode",
         parse_mode='Markdown'
     )
@@ -189,7 +182,7 @@ async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    res = call_db_api(f"/locations?query={quote(query)}&results=3")
+    res = call_db_api(f"/locations?query={quote(query)}&results=5")
     
     if not res:
         await update.message.reply_text("🛑 *API Error*\nPlease try again in 30 seconds.", parse_mode='Markdown')
@@ -203,7 +196,6 @@ async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             cb_string = f"{cmd}:{raw_id}:{raw_name}"
             
-            # Prevent Telegram's Button_data_invalid Error (max 64 bytes)
             while len(cb_string.encode('utf-8')) > 64:
                 raw_name = raw_name[:-1]
                 cb_string = f"{cmd}:{raw_id}:{raw_name}"
@@ -262,17 +254,13 @@ async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
             legs = js[0].get('legs', [])
             if any(l.get('cancelled') or (l.get('departureDelay', 0) or 0) > 300 for l in legs):
                 alerts.append(format_route_status(js, r['label']))
-            time.sleep(5) 
+            time.sleep(3) 
         if alerts:
             try: await context.bot.send_message(u[0], "🔔 *Travel Alert*\n\n" + "\n\n".join(alerts), parse_mode='Markdown')
             except: pass
-        time.sleep(10)
+        time.sleep(5)
 
 async def post_init(application: Application):
-    if ADMIN_ID != 0:
-        try: await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 *System v2.3 Live*")
-        except: pass
-    
     commands = [
         BotCommand("start", "Start Bot"),
         BotCommand("check", "Check Trains"),
@@ -285,11 +273,9 @@ async def post_init(application: Application):
     await application.bot.set_my_commands(commands)
 
 if __name__ == '__main__':
-    # Start Web Server
     Thread(target=run_web_server, daemon=True).start()
-    
-    # Start Bot
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('sethome', search_station))
     app.add_handler(CommandHandler('setwork', search_station))
