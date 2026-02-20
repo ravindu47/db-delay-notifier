@@ -14,13 +14,12 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DB_URL = os.environ.get("DATABASE_URL") 
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
-# Increased to 5 mirrors for maximum stability
+# Optimized Mirrors: Removed dead links and added VBN for stability
 API_URLS = [
     "https://v6.db.transport.rest",
-    "https://db.transport.rest",
-    "https://v6.db.api.transport.rest",
-    "https://transport.rest",
-    "https://v5.db.transport.rest"
+    "https://v5.db.transport.rest",
+    "https://v6.vbn.transport.rest", # Different source, more stable
+    "https://v5.vbn.transport.rest"
 ]
 
 # --- LOGGING ---
@@ -41,13 +40,14 @@ def call_db_api(endpoint):
     for base_url in API_URLS:
         try:
             url = f"{base_url}{endpoint}"
-            response = requests.get(url, timeout=10) # 10s timeout per server
+            # Increased timeout to 20s because DB servers are slow right now
+            response = requests.get(url, timeout=20) 
             if response.status_code == 200:
                 return response.json()
             else:
-                logger.warning(f"Server {base_url} status {response.status_code}. Retrying...")
+                logger.warning(f"Mirror {base_url} status {response.status_code}. Skipping...")
         except Exception as e:
-            logger.warning(f"Server {base_url} exception: {e}. Retrying...")
+            logger.warning(f"Mirror {base_url} failed: {e}")
     return None
 
 # --- DATABASE FUNCTIONS ---
@@ -101,8 +101,8 @@ def get_journey(from_id, to_id):
     return data.get('journeys', []) if data else None
 
 def format_route_status(journeys, label):
-    if journeys is None: return f"📍 *{label}:* ⚠️ System overloaded. All mirrors failing."
-    if not journeys: return f"📍 *{label}:* ⚠️ No journeys found currently."
+    if journeys is None: return f"📍 *{label}:* ⚠️ DB Servers busy. Try again in 1 min."
+    if not journeys: return f"📍 *{label}:* ⚠️ No connection found."
     j = journeys[0]
     legs = j.get('legs', [])
     dep = legs[0].get('departure', '')[11:16]
@@ -121,8 +121,8 @@ def format_route_status(journeys, label):
 # --- LOGIC ENGINE ---
 async def get_commute_plan(user):
     _, h_id, h_name, w_id, w_name, u_id, u_name, s_type, start_hour = user
-    if not h_id: return None, "Set your Home station first."
-    if not w_id and not u_id: return None, "Set your Work or Uni station."
+    if not h_id: return None, "Please set Home station."
+    if not w_id and not u_id: return None, "Please set Work/Uni station."
     
     start_hour = start_hour if start_hour is not None else 8
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
@@ -149,9 +149,9 @@ async def get_commute_plan(user):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.message.chat_id)
     await update.message.reply_text(
-        "👋 *CommuteBot Pro Active*\n\n"
-        "Configured with 5 API mirrors for maximum reliability.\n"
-        "Use /sethome, /setwork, or /setuni to register stations.",
+        "👋 *CommuteBot Pro Online*\n\n"
+        "Configured for high stability with VBN backup mirrors.\n"
+        "Use /sethome, /setwork, or /setuni to start.",
         parse_mode='Markdown'
     )
 
@@ -168,14 +168,10 @@ async def search_station(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = call_db_api(endpoint)
     
     if not res:
-        await update.message.reply_text("🛑 *Network Error*\nCould not reach any DB servers. Please try again shortly.", parse_mode='Markdown')
+        await update.message.reply_text("🛑 *Mirror Error*\nAll servers timed out. Please try again shortly.", parse_mode='Markdown')
         return
             
     btns = [[InlineKeyboardButton(s['name'], callback_data=f"{cmd}:{s['id']}:{s['name']}")] for s in res if 'id' in s]
-    if not btns:
-        await update.message.reply_text("🔍 *Not Found*\nTry a different station name.", parse_mode='Markdown')
-        return
-            
     await update.message.reply_text("🔍 *Select Station:*", reply_markup=InlineKeyboardMarkup(btns), parse_mode='Markdown')
 
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -230,7 +226,7 @@ async def check_all_users(context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application):
     if ADMIN_ID != 0:
         try:
-            await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 *System Online*\n5-Mirror Failover enabled.")
+            await application.bot.send_message(chat_id=ADMIN_ID, text="🚀 *System Online*\nStability optimized with VBN backup.")
         except: pass
     
     commands = [
